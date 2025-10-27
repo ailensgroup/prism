@@ -1,0 +1,55 @@
+[project]
+name = "prism_finagentbench"
+version = "1"
+requires-python = "==3.12.3"
+
+[tool.ruff]
+required-version = ">=0.11.2"
+
+# Assume Python 3.12.3
+target-version = "py312"
+
+line-length = 120
+
+[tool.ruff.lint]
+select = ["ALL"]
+extend-select = ["I"]
+ignore = [
+    "D100",
+    "D101",
+    "D104",
+    "COM812",
+    "DTZ005",
+    "DTZ007",
+    "T201",
+    "BLE001",
+    "PTH103",
+    "PTH110",
+    "PTH112",
+    "PTH118",
+    "PTH120",
+    "PTH123",
+    "PTH202",
+    "PTH208",
+    "FBT001",
+    "FBT002",
+    "PLR0912",
+    "PLR0913",
+    "PLR0915",
+    "PLR2004",
+    "TRY300",
+    "PERF401",
+    "E501",
+    "S110",
+    "C901",
+    "N806",
+    "N815",
+    "ASYNC230"
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.format]
+docstring-code-format = true
+docstring-code-line-length = 120

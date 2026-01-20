@@ -218,3 +218,6 @@ submission_files/
 pipeline_results/
 checkpoints/
 agentic_results/
+token_analysis/
+results_fiqa/
+fiqa_vector_stores/

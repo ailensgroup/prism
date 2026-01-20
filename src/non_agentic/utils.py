@@ -68,8 +68,8 @@ def get_sys_prompt(sys_prompt_json_folder: str, task_type: str = "chunk", versio
     Returns:
         str: The system prompt string for the requested ``version``.
     """
-    if task_type not in ["chunk", "doc"]:
-        msg = f"Unsupported task_type: {task_type}. Use 'chunk' or 'doc'."
+    if task_type not in ["chunk", "doc", "financebench", "financebench_qa", "fiqa"]:
+        msg = f"Unsupported task_type: {task_type}. Use 'chunk', 'doc', 'financebench', 'financebench_qa' or 'fiqa'."
         raise ValueError(msg)
 
     if version not in ["v1", "v2", "v3", "v4", "filtering_agent"]:

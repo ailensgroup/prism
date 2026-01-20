@@ -69,3 +69,17 @@ class Format(BaseModel):
     """
 
     answer: list[int]
+
+
+class FinanceBenchFormat(BaseModel):
+    """Standard response format for ranking tasks.
+
+    Used as the response format for OpenAI API calls to ensure
+    consistent output structure containing ranked indices.
+
+    Attributes:
+        answer (list[int]): List of ranked indices in order of relevance.
+    """
+
+    answer: str
+    justification: str

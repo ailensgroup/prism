@@ -1,5 +1,6 @@
 import json
 import os
+import random
 import re
 
 from langchain_community.vectorstores import FAISS
@@ -53,6 +54,7 @@ class ICLMessageBuilder:
         """
         self.training_data_path = training_data_path
         self.icl_n = icl_n
+        self.document_type = document_type
 
         # Construct vector store path
         self.vector_store_path = os.path.join(
@@ -65,6 +67,7 @@ class ICLMessageBuilder:
             azure_endpoint=azure_openai_endpoint,
             api_version="2024-02-01",
             model=embedding_model,
+            azure_deployment="text-embedding-3-small",
         )
 
         # Load or create vector store
@@ -125,7 +128,15 @@ class ICLMessageBuilder:
             raise ValueError(msg)
 
         print(f"📊 Creating vector store from {len(self.training_data)} examples")
-        documents = self._prepare_documents()
+        if self.document_type == "financebench":
+            print("📄 Preparing FinanceBench documents for indexing")
+            documents = self._prepare_financebench_documents()
+        elif self.document_type == "fiqa":
+            print("📄 Preparing FiQA documents for indexing")
+            documents = self._prepare_fiqa_documents()
+        else:
+            print("📄 Preparing documents for indexing")
+            documents = self._prepare_documents()
 
         self.vector_store = FAISS.from_documents(documents=documents, embedding=self.embeddings)
 
@@ -200,6 +211,96 @@ class ICLMessageBuilder:
             )
             documents.append(doc)
 
+        return documents
+
+    def _prepare_financebench_documents(self) -> list[Document]:
+        """Convert training items to LangChain ``Document`` objects.
+
+        Extracts a question from each training item (from the first message's
+        content). Builds a ``Document`` with the question as ``page_content`` and
+        metadata including sample identifiers and ground truth labels.
+
+        Returns:
+            List[Document]: Prepared documents ready for FAISS indexing.
+        """
+        documents = []
+
+        for idx, item in enumerate(self.training_data):
+
+            def safe_str(value: any) -> str:
+                if value is None:
+                    return ""
+                if isinstance(value, (list, dict)):
+                    return str(value)
+                if isinstance(value, (int, float, bool)):
+                    return value
+                return str(value).strip()
+
+            metadata = {
+                "index": int(idx),
+                "sample_id": safe_str(item.get("uuid", item.get("_id", f"sample_{idx}"))),
+                "question": safe_str(item.get("question", "")),
+                "question_type": safe_str(item.get("question_type", "")),
+                "answer": safe_str(item.get("answer", "")),
+                "justification": safe_str(item.get("justification", "")),
+            }
+
+            # Create document with metadata
+            doc = Document(
+                page_content=safe_str(item.get("question", "")),
+                metadata=metadata,
+            )
+            documents.append(doc)
+
+        for doc in documents:
+            if not isinstance(doc.page_content, str):
+                doc.page_content = str(doc.page_content)
+            # Remove weird characters
+            doc.page_content = doc.page_content.replace("\x00", "").strip()
+
+        for i, doc in enumerate(documents[:5]):
+            print(f"Doc {i} length: {len(doc.page_content)}, type: {type(doc.page_content)}")
+
+        return documents
+
+    def _prepare_fiqa_documents(self) -> list[Document]:
+        """Convert FiQA training items to LangChain Document objects.
+
+        Extracts queries from the training data and their associated relevant documents
+        from qrels. Builds Documents with query text as page_content and metadata
+        including relevant document IDs and relevance scores.
+
+        Returns:
+            List[Document]: Prepared documents ready for FAISS indexing.
+        """
+        documents = []
+
+        for idx, item in enumerate(self.training_data):
+            # Extract query information
+            query_id = item.get("query_id", f"query_{idx}")
+            query_text = item.get("text", "")
+
+            if not query_text:
+                continue
+
+            # Extract relevant documents and scores from qrel
+            relevant_docs = item.get("relevant_docs", [])
+            relevance_scores = item.get("relevance_scores", {})
+
+            # Create document with metadata
+            doc = Document(
+                page_content=query_text,
+                metadata={
+                    "index": idx,
+                    "query_id": query_id,
+                    "sample_id": query_id,
+                    "relevant_docs": relevant_docs,
+                    "relevance_scores": relevance_scores,
+                },
+            )
+            documents.append(doc)
+
+        print(f"📊 Prepared {len(documents)} FiQA documents")
         return documents
 
     def _parse_document_ranking_content(self, content: str) -> tuple:
@@ -534,3 +635,202 @@ class ICLMessageBuilder:
         if isinstance(result, tuple):
             return result[0]
         return result
+
+    def get_icl_for_financebench(
+        self,
+        samples_per_type: int = 3,
+        random_seed: int | None = None,
+    ) -> list[dict]:
+        """Retrieve random ICL examples for FinanceBench dataset with balanced question types.
+
+        Randomly samples examples from training data, ensuring equal representation
+        across all question types found in the dataset.
+
+        Args:
+            samples_per_type (int, optional): Number of examples to retrieve per
+                question_type. Defaults to 3.
+            random_seed (int | None, optional): Random seed for reproducibility.
+                If None, sampling will be non-deterministic. Defaults to None.
+
+        Returns:
+            List[Dict]: A list of user/assistant message pairs formatted as ICL examples.
+
+        """
+        self.training_data = self._load_training_data()
+        if not self.training_data:
+            msg = "Training data not loaded"
+            raise ValueError(msg)
+
+        # Set random seed if provided
+        if random_seed is not None:
+            random.seed(random_seed)
+
+        # Group training data by question_type
+        type_groups = {}
+        for item in self.training_data:
+            question_type = item.get("question_type", "")
+
+            if question_type not in type_groups:
+                type_groups[question_type] = []
+
+            type_groups[question_type].append(item)
+        # Randomly sample from each question type
+        selected_items = []
+        for question_type, items in type_groups.items():
+            print(f"{question_type}: {len(items)} items")
+
+            if samples_per_type <= 0:
+                msg = "samples_per_type must be > 0"
+                raise ValueError(msg)
+
+            sample_size = min(samples_per_type, len(items))
+            sampled = random.sample(items, sample_size)
+            selected_items.extend(sampled)
+
+        print(f"🔍 Sampled {len(selected_items)} examples across {len(type_groups)} question types:")
+        for qtype, items in type_groups.items():
+            print(f"  - {qtype}: {min(samples_per_type, len(items))} examples")
+
+        # Build ICL messages
+        icl_messages = []
+
+        for item in selected_items:
+            # Support both direct fields and messages format
+            if "question" in item:
+                # Direct format (top-level fields)
+                doc_question = item.get("question", "")
+                doc_answer = item.get("answer", "")
+                doc_justification = item.get("justification", "")
+                doc_question_type = item.get("question_type", "")
+            else:
+                # Messages format (nested in messages array)
+                messages = item.get("messages", [])
+
+                if not messages:
+                    continue
+
+                msg = messages[0]
+                doc_question = msg.get("question", "")
+                doc_answer = msg.get("answer", "")
+                doc_justification = msg.get("justification", "")
+                doc_question_type = msg.get("question_type", "")
+
+            # Format user message
+            user_content = f"Question: {doc_question}"
+            if doc_question_type:
+                user_content = f"[Type: {doc_question_type}]\n{user_content}"
+                user_content += f"Answer: {doc_answer}"
+                user_content += f"\n\nJustification: {doc_justification}"
+
+            icl_messages.append({"role": "user", "content": user_content})
+
+        print(f"✅ Generated {len(icl_messages)} ICL messages")
+
+        return icl_messages
+
+    def get_icl_for_fiqa(
+        self,
+        query_text: str,
+        samples_per_retrieval: int = 5,
+        format_style: str = "concise",
+        ensure_unique_queries: bool = True,
+    ) -> list[dict]:
+        """Retrieve ICL examples for FiQA dataset using similarity search.
+
+        Performs vector similarity search to find relevant examples from the training
+        data based on the input query. Returns formatted user/assistant message pairs
+        showing questions and their relevant documents.
+
+        Args:
+            query_text (str): The financial question to find similar examples for.
+            samples_per_retrieval (int, optional): Number of ICL examples to retrieve.
+                Defaults to 5.
+            format_style (str, optional): Output style, either "concise" or "detailed".
+                Defaults to "concise".
+            ensure_unique_queries (bool, optional): If True, filters results to ensure
+                unique question texts. Defaults to True.
+            retrieve_k_multiplier (int, optional): Multiplier for initial retrieval
+                when ensuring unique queries. Defaults to 3.
+
+        Returns:
+            List[Dict]: A list of user/assistant message pairs formatted as ICL examples.
+                Each pair shows a question and its relevant documents with relevance scores.
+        """
+        if not self.vector_store:
+            msg = "Vector store not initialized"
+            raise ValueError(msg)
+
+        # Validate input
+        if not query_text or not query_text.strip():
+            msg = "query_text cannot be empty"
+            raise ValueError(msg)
+
+        query_text = query_text.strip()
+
+        # Retrieve similar examples from training data
+        similar_docs = self.vector_store.similarity_search(query_text, k=samples_per_retrieval)
+
+        # Filter for unique queries if requested
+        if ensure_unique_queries:
+            seen_queries = set()
+            unique_similar_docs = []
+
+            for doc in similar_docs:
+                # The page_content contains the query text
+                doc_query = doc.page_content.strip()
+
+                # Only add if we haven't seen this query before
+                if doc_query not in seen_queries:
+                    seen_queries.add(doc_query)
+                    unique_similar_docs.append(doc)
+
+                # Stop once we have enough unique examples
+                if len(unique_similar_docs) >= samples_per_retrieval:
+                    break
+
+            similar_docs = unique_similar_docs
+            print(f"🔍 Filtered to {len(similar_docs)} unique query examples (retrieved {samples_per_retrieval} total)")
+
+        # Build ICL messages
+        icl_messages = []
+
+        for doc in similar_docs:
+            metadata = doc.metadata
+            doc_query = doc.page_content
+
+            # Get relevant documents from metadata
+            relevant_docs = metadata.get("relevant_docs", [])
+            relevance_scores = metadata.get("relevance_scores", {})
+
+            if not relevant_docs:
+                # Skip if no relevant documents
+                continue
+
+            # Format user message (the question)
+            user_content = f"Question: {doc_query}"
+            icl_messages.append({"role": "user", "content": user_content})
+
+            # Format assistant message (the relevant documents with scores)
+            if format_style == "concise":
+                # Simple list format with relevance scores
+                response_parts = []
+                for doc_id in relevant_docs:
+                    score = relevance_scores.get(doc_id, 1)  # Default to 1 if not specified
+                    response_parts.append(f"Document ID: {doc_id} (Relevance: {score})")
+
+                response = "Relevant documents:\n" + "\n".join(response_parts)
+            else:  # detailed
+                # Include reasoning
+                response = f"Based on the question '{doc_query}', "
+                response += f"I identified {len(relevant_docs)} relevant documents. "
+                response += "The most relevant documents are:\n"
+
+                for doc_id in relevant_docs:
+                    score = relevance_scores.get(doc_id, 1)
+                    response += f"- Document ID: {doc_id} (Relevance Score: {score})\n"
+
+            icl_messages.append({"role": "assistant", "content": response})
+
+        print(f"✅ Retrieved {len(similar_docs)} ICL examples for query: '{query_text[:80]}...'")
+
+        return icl_messages

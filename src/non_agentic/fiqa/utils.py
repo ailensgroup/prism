@@ -61,6 +61,10 @@ async def evaluate_fiqa_results(
         query_id = str(row["query_id"])
         ranked_doc_ids = row["ranked_doc_ids"]
 
+        # Parse ranked_doc_ids if it's a string representation of a list
+        if isinstance(ranked_doc_ids, str):
+            ranked_doc_ids = json.loads(ranked_doc_ids)
+
         if query_id not in ground_truth:
             print(f"Warning: Query {query_id} not found in ground truth, skipping...")
             continue

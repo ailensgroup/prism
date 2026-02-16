@@ -2,13 +2,14 @@ import asyncio
 import json
 import os
 import traceback
+from asyncio import Semaphore
 from itertools import product
 from time import perf_counter
 
 import pandas as pd
 from dotenv import load_dotenv
+from langchain_core.vectorstores import VectorStoreRetriever
 from langchain_openai import AzureOpenAIEmbeddings
-from tqdm import tqdm
 
 from src.icl_message_builder import ICLMessageBuilder
 from src.non_agentic.financebench.metrics_tracker import MetricsTracker
@@ -16,6 +17,114 @@ from src.non_agentic.financebench.vector_store import build_vectorstore_retrieve
 from src.non_agentic.fiqa.utils import evaluate_fiqa_results, get_fiqa_ranking
 
 load_dotenv()
+
+
+async def process_single_query(
+    query: str,
+    query_relevant_docs: dict,
+    azure_openai_model: str,
+    prompt_version: str,
+    use_icl: bool,
+    icl_n: int,
+    icl_builder: ICLMessageBuilder,
+    retriever: VectorStoreRetriever,
+    metrics_tracker: MetricsTracker,
+    semaphore: Semaphore,
+) -> dict:
+    """Process a single query with rate limiting via semaphore."""
+    async with semaphore:
+        query_id = query["query_id"]
+        query_text = query["text"]
+
+        icl_messages = None
+        if use_icl and icl_builder:
+            icl_messages = icl_builder.get_icl_for_fiqa(
+                query_text=query_text,
+                samples_per_retrieval=icl_n,
+                format_style="concise",
+            )
+
+        try:
+            relevance_scores, ranked_doc_ids, answer, justification = await get_fiqa_ranking(
+                openai_model=azure_openai_model,
+                prompt_version=prompt_version,
+                eval_mode="sharedStore",
+                icl_messages=icl_messages,
+                query_text=query_text,
+                retriever=retriever,
+                metrics_tracker=metrics_tracker,
+                query_id=query_id,
+            )
+
+        except Exception as e:
+            print(f"\nError processing query {query_id}: {e}")
+            traceback.print_exc()
+            relevance_scores = {}
+            ranked_doc_ids = []
+            answer = None
+            justification = f"Error: {e!s}"
+
+        return {
+            "query_id": query_id,
+            "query_text": query_text,
+            "ranked_doc_ids": json.dumps(ranked_doc_ids),
+            "relevance_scores": json.dumps(relevance_scores),
+            "raw_answer": json.dumps(answer),
+            "justification": justification,
+            "model": azure_openai_model,
+            "prompt_version": prompt_version,
+            "use_icl": use_icl,
+            "num_icl_examples": icl_n if use_icl else 0,
+            "ground_truth_relevant_docs": json.dumps(query_relevant_docs.get(str(query_id), [])),
+        }
+
+
+async def process_queries_parallel(
+    queries: list,
+    query_relevant_docs: dict,
+    azure_openai_model: str,
+    prompt_version: str,
+    use_icl: bool,
+    icl_n: int,
+    icl_builder: ICLMessageBuilder,
+    retriever: VectorStoreRetriever,
+    metrics_tracker: MetricsTracker,
+    results_file: str,
+    max_concurrent: int = 10,
+    save_interval: int = 10,
+) -> list:
+    """Process queries in parallel with periodic saves."""
+    semaphore = Semaphore(max_concurrent)
+    results = []
+
+    tasks = [
+        process_single_query(
+            query,
+            query_relevant_docs,
+            azure_openai_model,
+            prompt_version,
+            use_icl,
+            icl_n,
+            icl_builder,
+            retriever,
+            metrics_tracker,
+            semaphore,
+        )
+        for query in queries
+    ]
+
+    # Process tasks as they complete
+    for idx, coro in enumerate(asyncio.as_completed(tasks)):
+        result = await coro
+        results.append(result)
+
+        # Periodic saves
+        if idx % save_interval == 0:
+            df_results = pd.DataFrame(results)
+            df_results.to_csv(results_file, index=False)
+            print(f"\nSaved intermediate results ({idx}/{len(queries)} queries)")
+
+    return results
 
 
 async def main(
@@ -26,6 +135,7 @@ async def main(
     azure_openai_model: str = "gpt-5-mini",
     evaluate_only: bool = False,
     output_dir: str = "./results_fiqa",
+    max_concurrent: int = 10,
 ) -> None:
     """Run the FiQA evaluation pipeline.
 
@@ -37,6 +147,7 @@ async def main(
         azure_openai_model (str, optional): Azure OpenAI model name. Defaults to "gpt-5-mini".
         evaluate_only (bool, optional): If True, only evaluate existing results. Defaults to False.
         output_dir (str, optional): Directory to save results. Defaults to "./results_fiqa".
+        max_concurrent (int, optional): Maximum concurrent API calls. Defaults to 10.
 
     Returns:
         None
@@ -157,8 +268,7 @@ async def main(
         print(f"   Prompt version: {prompt_version}")
         print(f"   Use ICL: {use_icl}")
         print(f"   ICL examples: {icl_n if use_icl else 0}")
-
-        results = []
+        print(f"   Max concurrent requests: {max_concurrent}")
 
         print("\nBuilding shared vector store with all documents...")
         retriever, _ = build_vectorstore_retriever_fiqa(
@@ -174,58 +284,21 @@ async def main(
         )
         print("Shared vector store built")
 
-        for i, query in enumerate(tqdm(queries, desc="Evaluating queries")):
-            query_id = query["query_id"]
-            query_text = query["text"]
-
-            icl_messages = None
-            if use_icl and icl_builder:
-                icl_messages = icl_builder.get_icl_for_fiqa(
-                    query_text=query_text,
-                    samples_per_retrieval=icl_n,
-                    format_style="concise",
-                )
-
-            try:
-                relevance_scores, ranked_doc_ids, answer, justification = await get_fiqa_ranking(
-                    openai_model=azure_openai_model,
-                    prompt_version=prompt_version,
-                    eval_mode="sharedStore",
-                    icl_messages=icl_messages,
-                    query_text=query_text,
-                    retriever=retriever,
-                    metrics_tracker=metrics_tracker,
-                    query_id=query_id,
-                )
-
-            except Exception as e:
-                print(f"\nError processing query {query_id}: {e}")
-
-                traceback.print_exc()
-                relevance_scores = {}
-                ranked_doc_ids = []
-                justification = f"Error: {e!s}"
-
-            results.append(
-                {
-                    "query_id": query_id,
-                    "query_text": query_text,
-                    "ranked_doc_ids": json.dumps(ranked_doc_ids),
-                    "relevance_scores": json.dumps(relevance_scores),
-                    "raw_answer": json.dumps(answer),
-                    "justification": justification,
-                    "model": azure_openai_model,
-                    "prompt_version": prompt_version,
-                    "use_icl": use_icl,
-                    "num_icl_examples": icl_n if use_icl else 0,
-                    "ground_truth_relevant_docs": json.dumps(query_relevant_docs.get(str(query_id), [])),
-                }
-            )
-
-            if (i + 1) % 10 == 0:
-                df_results = pd.DataFrame(results)
-                df_results.to_csv(results_file, index=False)
-                print(f"\nSaved intermediate results ({i + 1}/{len(queries)} queries)")
+        print("\nProcessing queries in parallel...")
+        results = await process_queries_parallel(
+            queries=queries,
+            query_relevant_docs=query_relevant_docs,
+            azure_openai_model=azure_openai_model,
+            prompt_version=prompt_version,
+            use_icl=use_icl,
+            icl_n=icl_n,
+            icl_builder=icl_builder,
+            retriever=retriever,
+            metrics_tracker=metrics_tracker,
+            results_file=results_file,
+            max_concurrent=max_concurrent,
+            save_interval=10,
+        )
 
         df_results = pd.DataFrame(results)
         df_results.to_csv(results_file, index=False)
@@ -252,9 +325,9 @@ async def main(
 
 
 if __name__ == "__main__":
-    use_icls = [True, False]
-    prompt_versions = ["v1", "v2", "v3", "v4"]
-    azure_openai_models = ["gpt-5-mini"]
+    use_icls = [False]
+    prompt_versions = ["v4"]
+    azure_openai_models = ["gpt-4.1"]
 
     # Fixed settings
     dry_run = True
@@ -289,3 +362,4 @@ if __name__ == "__main__":
         minutes, seconds = divmod(rem, 60)
 
         print(f"Time: {int(hours):02d}:{int(minutes):02d}:{seconds:05.2f}")
+

@@ -221,3 +221,5 @@ agentic_results/
 token_analysis/
 results_fiqa/
 fiqa_vector_stores/
+results_fiqa_oss/
+results_fiqa_oss_300/

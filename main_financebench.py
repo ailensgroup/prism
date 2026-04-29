@@ -7,6 +7,7 @@ from time import perf_counter
 
 import pandas as pd
 from dotenv import load_dotenv
+from langchain_azure_ai.chat_models import AzureAIOpenAIApiChatModel
 from langchain_openai import AzureOpenAIEmbeddings
 from openai import AsyncAzureOpenAI
 from tqdm import tqdm
@@ -15,6 +16,7 @@ from src.icl_message_builder import ICLMessageBuilder
 from src.non_agentic.financebench.configs import (
     PATH_BASELINE_RESULTS,
     PATH_DATASET_JSONL,
+    PATH_OSS_RESULTS,
     PATH_RESULTS,
     PROCESSED_PATH_DATASET_JSONL,
 )
@@ -25,6 +27,53 @@ from src.non_agentic.financebench.vector_store import build_vectorstore_retrieve
 
 load_dotenv()
 
+_AZURE_AI_FOUNDRY_MODELS = {
+    "deepseek-v3.2",
+    "gpt-oss-120b",
+    "llama-4-maverick-17b-128e-instruct-fp8",
+    "grok-4-20-reasoning",
+}
+
+
+def _build_llm(
+    openai_model: str, openai_endpoint: str, openai_key: str
+) -> AsyncAzureOpenAI | AzureAIOpenAIApiChatModel:
+    """Factory that returns the correct LangChain LLM client based on the model name.
+
+    - GPT models  → AzureChatOpenAI  (standard Azure OpenAI service)
+    - Everything else (DeepSeek, gpt-oss-120b, Kimi, Phi-4, Grok, …)
+                  → AzureAIOpenAIApiChatModel  (Azure AI Foundry / Model Inference API)
+
+    Environment variables expected for Foundry models:
+        AZURE_INFERENCE_ENDPOINT   - your Foundry project endpoint
+        AZURE_INFERENCE_CREDENTIAL - your Foundry API key
+    """
+    if openai_model.lower().startswith("gpt") and openai_model.lower() not in _AZURE_AI_FOUNDRY_MODELS:
+        # ------------------------------------------------------------------ #
+        # Standard Azure OpenAI  (gpt-4o, gpt-4, gpt-35-turbo, …)           #
+        # ------------------------------------------------------------------ #
+        return AsyncAzureOpenAI(
+            api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
+            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+            api_key=os.getenv("AZURE_OPENAI_KEY"),
+        )
+
+    # ---------------------------------------------------------------------- #
+    # Azure AI Foundry models                                                 #
+    # (DeepSeek-V3.2, gpt-oss-120b, Kimi-K2.5, Phi-4-reasoning, grok-4-…)   #
+    # ---------------------------------------------------------------------- #
+    print(f"🤖 AzureAIOpenAIApiChatModel → {openai_endpoint} | model: {openai_model}")
+
+    return AzureAIOpenAIApiChatModel(
+        endpoint=openai_endpoint,
+        credential=openai_key,  # plain string key for API key auth
+        model=openai_model,  # exact deployment name e.g. "DeepSeek-V3.2"
+        temperature=1.0,
+        max_tokens=16384,
+        use_responses_api=False,  # use Chat Completions API, not Responses API
+        api_version="v1",
+    )
+
 
 async def main(
     use_icl: bool = True,
@@ -33,6 +82,8 @@ async def main(
     run_idx: str = "16",
     eval_mode: str = "singleStore",
     azure_openai_model: str = "gpt-4.1",
+    azure_endpoint: str = "default_endpoint",
+    azure_key: str = "default_key",
     evaluate_only: bool = False,
     output_dir: str = PATH_RESULTS,
     baseline: bool = False,
@@ -49,6 +100,8 @@ async def main(
             output paths and logging. Defaults to ``"16"``.
         eval_mode (str, optional): Evaluation mode to use. Defaults to "singleStore".
         azure_openai_model (str, optional): Azure OpenAI model to use. Defaults to "gpt-4.1".
+        azure_endpoint (str, optional): Azure OpenAI endpoint URL. Defaults to value from .env.
+        azure_key (str, optional): Azure OpenAI API key. Defaults to value from .env.
         evaluate_only (bool, optional): If True, only run evaluation on existing results.
         output_dir (str, optional): Directory to save outputs. Defaults to PATH_RESULTS.
         baseline (bool, optional): If True, run baseline evaluation.
@@ -56,7 +109,7 @@ async def main(
     Returns:
         None
     """
-    metrics_tracker = MetricsTracker(output_dir=f"./token_analysis/baseline_{baseline}")
+    metrics_tracker = MetricsTracker(output_dir=f"./financebench/token_analysis/baseline_{baseline}")
     run_dir = metrics_tracker.create_run_directory(
         model=azure_openai_model,
         eval_mode=eval_mode,
@@ -121,10 +174,10 @@ async def main(
         df_questions = pd.read_json(PATH_DATASET_JSONL, lines=True)
         df_eval = df_questions
 
-        openai_client = AsyncAzureOpenAI(
-            api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
-            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-            api_key=os.getenv("AZURE_OPENAI_KEY"),
+        openai_client = _build_llm(
+            openai_model=azure_model_name,
+            openai_endpoint=azure_endpoint,
+            openai_key=azure_key,
         )
 
         print("Clients initialized successfully")
@@ -138,7 +191,9 @@ async def main(
         print(f"Ground truth file: {ground_truth}")
         print(f"Document PDFs directory: {document_pdfs_dir}")
         current_timestamp = run_idx + "_" + datetime.now().strftime("%Y%m%d_%H%M%S")
-        financebench_ranking_output_dir = os.path.join("./llm_output/chunk_output", current_timestamp)
+        financebench_ranking_output_dir = os.path.join(
+            f"./llm_output/chunk_output_{azure_openai_model}", current_timestamp
+        )
 
         if not os.path.isdir(financebench_ranking_output_dir):
             os.makedirs(financebench_ranking_output_dir)
@@ -215,20 +270,25 @@ async def main(
                 raise ValueError(error_message)
 
             if baseline:
-                (answer, retrieved_documents) = await get_baseline(
+                (raw_response_str, answer, retrieved_documents) = await get_baseline(
                     openai_client=openai_client,
                     openai_model=azure_openai_model,
+                    openai_endpoint=azure_endpoint,
+                    openai_key=azure_key,
                     eval_mode=eval_mode,
                     question=row["question"],
                     context=context,
                     retriever=retriever,
                     metrics_tracker=metrics_tracker,
                     question_id=row["financebench_id"],
+                    run_dir=run_dir,
                 )
             else:
-                (answer, retrieved_documents) = await get_answer_with_retry(
+                (raw_response_str, answer, retrieved_documents) = await get_answer_with_retry(
                     openai_client=openai_client,
                     openai_model=azure_openai_model,
+                    openai_endpoint=azure_endpoint,
+                    openai_key=azure_key,
                     prompt_version=prompt_version,
                     eval_mode=eval_mode,
                     icl_messages=icl_messages,
@@ -237,6 +297,7 @@ async def main(
                     retriever=retriever,
                     metrics_tracker=metrics_tracker,
                     question_id=row["financebench_id"],
+                    run_dir=run_dir,
                 )
 
             results.append(
@@ -247,6 +308,7 @@ async def main(
                     "question": row["question"],
                     "gold_answer": row["answer"],
                     "model_answer": answer,
+                    "raw_answer": raw_response_str,
                     "retrieved_documents": retrieved_documents,
                 }
             )
@@ -313,7 +375,7 @@ async def main(
 
 if __name__ == "__main__":
     eval_modes = ["oracle"]
-    azure_openai_models = ["gpt-5-mini"]
+    azure_model_names = ["gpt-oss-120b"]
 
     icl_n = 9
     run_idx = "2"
@@ -326,29 +388,30 @@ if __name__ == "__main__":
         output_dir = PATH_BASELINE_RESULTS
         print("Running in BASELINE mode (ICL disabled)")
     else:
-        use_icls = [True, False]
-        prompt_versions = ["v1", "v2", "v3", "v4"]
-        output_dir = PATH_RESULTS
+        use_icls = [True]
+        prompt_versions = ["v4"]
+        output_dir = PATH_OSS_RESULTS
         print("Running in EXPERIMENT mode (ICL enabled)")
 
-    for (
-        prompt_version,
-        eval_mode,
-        azure_openai_model,
-        use_icl,
-    ) in product(
-        prompt_versions,
-        eval_modes,
-        azure_openai_models,
-        use_icls,
+    for prompt_version, eval_mode, use_icl, azure_model_name in product(
+        prompt_versions, eval_modes, use_icls, azure_model_names
     ):
         print(
             f"\nRunning config:"
             f" prompt={prompt_version},"
             f" eval_mode={eval_mode},"
-            f" model={azure_openai_model},"
+            f" model={azure_model_name},"
             f" use_icl={use_icl}"
         )
+
+        if azure_model_name in _AZURE_AI_FOUNDRY_MODELS:
+            print(f"Using Azure AI Foundry model: {azure_model_name}")
+            azure_endpoint = os.getenv("AZURE_OSS_ENDPOINT")
+            azure_key = os.getenv("AZURE_OSS_KEY")
+        else:
+            print(f"Using standard Azure OpenAI model: {azure_model_name}")
+            azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+            azure_key = os.getenv("AZURE_OPENAI_KEY")
 
         start_time = perf_counter()
 
@@ -358,7 +421,9 @@ if __name__ == "__main__":
                 icl_n=icl_n,
                 prompt_version=prompt_version,
                 eval_mode=eval_mode,
-                azure_openai_model=azure_openai_model,
+                azure_openai_model=azure_model_name,
+                azure_endpoint=azure_endpoint,
+                azure_key=azure_key,
                 run_idx=run_idx,
                 evaluate_only=evaluate_only,
                 output_dir=output_dir,

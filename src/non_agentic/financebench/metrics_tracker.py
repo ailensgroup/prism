@@ -1,4 +1,5 @@
 import json
+import tempfile
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -11,6 +12,10 @@ AZURE_PRICING = {
     "gpt-5": {"input": 1.25 / 1000000, "output": 10 / 1000000},
     "gpt-5.1": {"input": 1.25 / 1000000, "output": 10 / 1000000},
     "gpt-5.2": {"input": 1.75 / 1000000, "output": 14 / 1000000},
+    "deepseek-v3.2": {"input": 0.58 / 1000000, "output": 1.68 / 1000000},
+    "gpt-oss-120b": {"input": 0.15 / 1000000, "output": 0.60 / 1000000},
+    "grok-4-20-reasoning": {"input": 3 / 1000000, "output": 15 / 1000000},
+    "llama-4-maverick-17b-128e-instruct-fp8": {"input": 0.25 / 1000000, "output": 1 / 1000000},
 }
 
 
@@ -28,6 +33,8 @@ def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
 class APICallMetrics:
     """Metrics for a single API call."""
 
+    start_time: str
+    end_time: str
     timestamp: str
     question_id: str
     question: str
@@ -36,7 +43,10 @@ class APICallMetrics:
     prompt_version: str
     use_icl: bool
 
+    input_prompt: str
     input_tokens: int
+    output_response: str
+    output_raw_response: str
     output_tokens: int
     total_tokens: int
 
@@ -87,7 +97,7 @@ class MetricsTracker:
         self.current_run_metrics.append(metric)
 
     def save_run_metrics(self, run_dir: Path, filename: str = "metrics.json") -> Path:
-        """Save all metrics for the current run to JSON."""
+        """Save API call metric."""
         output_file = run_dir / filename
         metrics_data = [asdict(m) for m in self.current_run_metrics]
         summary = self._calculate_summary(self.current_run_metrics)
@@ -101,11 +111,14 @@ class MetricsTracker:
             "detailed_metrics": metrics_data,
         }
 
-        with open(output_file, "w") as f:
-            json.dump(output, f, indent=2)
+        # Write to a temp file first, then atomically replace the real file
+        with tempfile.NamedTemporaryFile(mode="w", dir=run_dir, suffix=".tmp", delete=False) as tmp:
+            json.dump(output, tmp, indent=2)
+            tmp_path = Path(tmp.name)
+
+        tmp_path.replace(output_file)  # atomic on most OS/filesystems
 
         print(f"Saved {len(metrics_data)} metrics to {output_file}")
-
         return output_file
 
     def _calculate_summary(self, metrics: list[APICallMetrics]) -> dict:

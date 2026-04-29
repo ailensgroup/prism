@@ -101,7 +101,7 @@ def build_vectorstore_retriever_fiqa(
     embeddings: AzureOpenAIEmbeddings,
     db_path: str = VS_DIR_VS,
     docs_dict: dict | None = None,
-    search_kwargs: dict | None = None,
+    search_number: int | None = None,
     batch_size: int = 1000,
     delay_between_batches: float = 2.0,
 ) -> tuple[VectorStoreRetriever, Chroma]:
@@ -213,8 +213,7 @@ def build_vectorstore_retriever_fiqa(
         except Exception as e:
             print(f"   Could not verify document count: {e}")
 
-    if search_kwargs is None:
-        search_kwargs = {"k": 500}
+    search_kwargs = {"k": 500} if search_number is None else {"k": search_number}
 
     retriever = vectordb.as_retriever(
         search_type="similarity",

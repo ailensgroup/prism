@@ -23,6 +23,8 @@ async def process_single_query(
     query: str,
     query_relevant_docs: dict,
     azure_openai_model: str,
+    azure_openai_endpoint: str,
+    azure_openai_key: str,
     prompt_version: str,
     use_icl: bool,
     icl_n: int,
@@ -30,9 +32,11 @@ async def process_single_query(
     retriever: VectorStoreRetriever,
     metrics_tracker: MetricsTracker,
     semaphore: Semaphore,
+    run_dir: str | None = None,
 ) -> dict:
     """Process a single query with rate limiting via semaphore."""
     async with semaphore:
+        await asyncio.sleep(1.0)
         query_id = query["query_id"]
         query_text = query["text"]
 
@@ -45,8 +49,10 @@ async def process_single_query(
             )
 
         try:
-            relevance_scores, ranked_doc_ids, answer, justification = await get_fiqa_ranking(
+            relevance_scores, ranked_doc_ids, raw_response_str, answer, justification = await get_fiqa_ranking(
                 openai_model=azure_openai_model,
+                openai_endpoint=azure_openai_endpoint,
+                openai_key=azure_openai_key,
                 prompt_version=prompt_version,
                 eval_mode="sharedStore",
                 icl_messages=icl_messages,
@@ -54,6 +60,7 @@ async def process_single_query(
                 retriever=retriever,
                 metrics_tracker=metrics_tracker,
                 query_id=query_id,
+                run_dir=run_dir,
             )
 
         except Exception as e:
@@ -70,6 +77,7 @@ async def process_single_query(
             "ranked_doc_ids": json.dumps(ranked_doc_ids),
             "relevance_scores": json.dumps(relevance_scores),
             "raw_answer": json.dumps(answer),
+            "raw_response": raw_response_str,
             "justification": justification,
             "model": azure_openai_model,
             "prompt_version": prompt_version,
@@ -83,6 +91,8 @@ async def process_queries_parallel(
     queries: list,
     query_relevant_docs: dict,
     azure_openai_model: str,
+    azure_openai_endpoint: str,
+    azure_openai_key: str,
     prompt_version: str,
     use_icl: bool,
     icl_n: int,
@@ -92,16 +102,36 @@ async def process_queries_parallel(
     results_file: str,
     max_concurrent: int = 10,
     save_interval: int = 10,
+    run_dir: str | None = None,
 ) -> list:
     """Process queries in parallel with periodic saves."""
     semaphore = Semaphore(max_concurrent)
-    results = []
+
+    # --- Resume logic: load already-processed queries ---
+    if os.path.exists(results_file):
+        existing_df = pd.read_csv(results_file)
+        processed_ids = set(existing_df["query_id"].astype(str).tolist())
+        results = existing_df.to_dict(orient="records")
+        print(
+            f"Resuming: {len(processed_ids)} queries already processed, {len(queries) - len(processed_ids)} remaining."
+        )
+    else:
+        processed_ids = set()
+        results = []
+
+    pending_queries = [q for q in queries if str(q["query_id"]) not in processed_ids]
+
+    if not pending_queries:
+        print("All queries already processed. Nothing to do.")
+        return results
 
     tasks = [
         process_single_query(
             query,
             query_relevant_docs,
             azure_openai_model,
+            azure_openai_endpoint,
+            azure_openai_key,
             prompt_version,
             use_icl,
             icl_n,
@@ -109,8 +139,9 @@ async def process_queries_parallel(
             retriever,
             metrics_tracker,
             semaphore,
+            run_dir,
         )
-        for query in queries
+        for query in pending_queries
     ]
 
     # Process tasks as they complete
@@ -133,9 +164,12 @@ async def main(
     prompt_version: str = "v4",
     run_idx: str = "1",
     azure_openai_model: str = "gpt-5-mini",
+    azure_openai_endpoint: str = "dummy_endpoint",  # Placeholder, will be overridden by env var
+    azure_openai_key: str = "dummy_key",  # Placeholder, will be overridden by env var
     evaluate_only: bool = False,
     output_dir: str = "./results_fiqa",
     max_concurrent: int = 10,
+    search_number: int | None = 500,
 ) -> None:
     """Run the FiQA evaluation pipeline.
 
@@ -145,9 +179,12 @@ async def main(
         prompt_version (str, optional): Version of system prompt to use. Defaults to "v4".
         run_idx (str, optional): Run identifier. Defaults to "1".
         azure_openai_model (str, optional): Azure OpenAI model name. Defaults to "gpt-5-mini".
+        azure_openai_endpoint (str, optional): Azure OpenAI Endpoint.
+        azure_openai_key (str, optional): Azure OpenAI Key.
         evaluate_only (bool, optional): If True, only evaluate existing results. Defaults to False.
         output_dir (str, optional): Directory to save results. Defaults to "./results_fiqa".
         max_concurrent (int, optional): Maximum concurrent API calls. Defaults to 10.
+        search_number (int | None, optional): Number of documents to retrieve from vector store. Defaults to 500.
 
     Returns:
         None
@@ -207,8 +244,8 @@ async def main(
                 training_data_path=processed_train_file,
                 document_type="fiqa",
                 icl_n=icl_n,
-                azure_openai_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-                azure_openai_key=os.getenv("AZURE_OPENAI_KEY"),
+                azure_openai_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],  # Fix openai due to embedding class
+                azure_openai_key=os.environ["AZURE_OPENAI_KEY"],  # Fix openai due to embedding class
             )
             print("ICL builder initialized")
 
@@ -281,6 +318,7 @@ async def main(
             ),
             db_path="./fiqa_vector_stores",
             docs_dict=docs_dict,
+            search_number=search_number,
         )
         print("Shared vector store built")
 
@@ -289,6 +327,8 @@ async def main(
             queries=queries,
             query_relevant_docs=query_relevant_docs,
             azure_openai_model=azure_openai_model,
+            azure_openai_endpoint=azure_openai_endpoint,
+            azure_openai_key=azure_openai_key,
             prompt_version=prompt_version,
             use_icl=use_icl,
             icl_n=icl_n,
@@ -298,6 +338,7 @@ async def main(
             results_file=results_file,
             max_concurrent=max_concurrent,
             save_interval=10,
+            run_dir=run_dir,
         )
 
         df_results = pd.DataFrame(results)
@@ -305,17 +346,22 @@ async def main(
         print(f"\nFinal results saved to: {results_file}")
 
         print("\nRunning evaluation...")
-        evaluation_results = await evaluate_fiqa_results(
-            results_df=df_results,
-            qrels_df=qrels_df,
-            k_ndcg=10,
-            k_recall=100,
-        )
+        try:
+            evaluation_results = await evaluate_fiqa_results(
+                results_df=df_results,
+                qrels_df=qrels_df,
+                k_ndcg=10,
+                k_recall=100,
+            )
 
-        with open(evaluation_file, "w") as f:
-            json.dump(evaluation_results, f, indent=2)
+            with open(evaluation_file, "w") as f:
+                json.dump(evaluation_results, f, indent=2)
 
-        print(f"💾 Evaluation results saved to: {evaluation_file}")
+            print(f"💾 Evaluation results saved to: {evaluation_file}")
+        except Exception as e:
+            print(f"\nError during evaluation: {e}")
+            traceback.print_exc()
+
         metrics_tracker.save_run_metrics(run_dir)
         metrics_tracker.export_summary_csv(run_dir)
 
@@ -325,23 +371,34 @@ async def main(
 
 
 if __name__ == "__main__":
-    use_icls = [False]
+    azure_model_name = "Llama-4-Maverick-17B-128E-Instruct-FP8"
+
+    if azure_model_name in [
+        "DeepSeek-V3.2",
+        "gpt-oss-120b",
+        "grok-4-20-reasoning",
+        "Llama-4-Maverick-17B-128E-Instruct-FP8",
+    ]:
+        azure_endpoint = os.getenv("AZURE_OSS_ENDPOINT")
+        azure_key = os.getenv("AZURE_OSS_KEY")
+    else:
+        azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+        azure_key = os.getenv("AZURE_OPENAI_KEY")
+
+    use_icls = [True, False]
     prompt_versions = ["v4"]
-    azure_openai_models = ["gpt-4.1"]
 
     # Fixed settings
-    dry_run = True
     icl_n = 5
     run_idx = "2"
     evaluate_only = False
-    output_dir = "results_fiqa"
+    output_dir = "results_fiqa_oss_300"
 
     for (
         prompt_version,
-        azure_openai_model,
         use_icl,
-    ) in product(prompt_versions, azure_openai_models, use_icls):
-        print(f"\nRunning config: prompt={prompt_version}, model={azure_openai_model}, use_icl={use_icl}")
+    ) in product(prompt_versions, use_icls):
+        print(f"\nRunning config: prompt={prompt_version}, model={azure_model_name}, use_icl={use_icl}")
 
         start_time = perf_counter()
 
@@ -350,10 +407,14 @@ if __name__ == "__main__":
                 use_icl=use_icl,
                 icl_n=icl_n,
                 prompt_version=prompt_version,
-                azure_openai_model=azure_openai_model,
+                azure_openai_model=azure_model_name,
+                azure_openai_endpoint=azure_endpoint,
+                azure_openai_key=azure_key,
                 run_idx=run_idx,
                 evaluate_only=evaluate_only,
                 output_dir=output_dir,
+                max_concurrent=5,  # Control rate limit
+                search_number=300,  # Control context length
             )
         )
 
@@ -362,4 +423,3 @@ if __name__ == "__main__":
         minutes, seconds = divmod(rem, 60)
 
         print(f"Time: {int(hours):02d}:{int(minutes):02d}:{seconds:05.2f}")
-

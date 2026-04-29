@@ -2,6 +2,7 @@ PATH_DATASET_JSONL = "./data/financebench/financebench_open_source.jsonl"
 PROCESSED_PATH_DATASET_JSONL = "./data/financebench/financebench_open_source_processed.jsonl"
 PATH_DOCUMENT_INFO_JSONL = "./data/financebench/financebench_document_information.jsonl"
 PATH_RESULTS = "./data/financebench/results"
+PATH_OSS_RESULTS = "./data/financebench/results_oss"
 PATH_BASELINE_RESULTS = "./data/financebench/baseline_results"
 PATH_PDFS = "./data/financebench/pdfs"
 VS_CHUNK_SIZE = 1024

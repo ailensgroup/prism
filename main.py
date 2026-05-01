@@ -5,6 +5,7 @@ from time import perf_counter
 
 import pandas as pd
 from dotenv import load_dotenv
+from langchain_azure_ai.chat_models import AzureAIOpenAIApiChatModel
 from openai import AsyncAzureOpenAI
 
 from src.agentic.chunk.chunk_experts import initialize_chunk_agents
@@ -13,6 +14,7 @@ from src.agentic.langgraph.main import initialize_langgraph_workflows
 from src.agentic.main import main_multi_agent
 from src.non_agentic.chunk.chunk_utils import evaluate_chunk_ranking
 from src.non_agentic.doc.doc_utils import evaluate_document_ranking
+from src.non_agentic.metrics_tracker import MetricsTracker
 from src.non_agentic.utils import (
     save_submission_csv,
 )
@@ -22,6 +24,7 @@ load_dotenv()
 
 async def main(
     dry_run: bool = False,
+    openai_model: str = os.getenv("AZURE_OPENAI_MODEL"),
     use_doc_icl: bool = True,
     use_chunk_icl: bool = True,
     icl_n: int = 5,
@@ -46,6 +49,8 @@ async def main(
         dry_run (bool, optional): If True, perform a no-side-effects run
             (e.g., skip model calls/writes) to validate the pipeline.
             Defaults to False.
+        openai_model (str, optional): Name of the OpenAI/Azure model to use for
+            ranking. Defaults to the value of the AZURE_OPENAI_MODEL environment variable.
         use_doc_icl (bool): If True, add ICL into the system prompt for document ranking.
         icl_n (int, optional): Number of in-context learning examples to retrieve.
             Defaults to 5.
@@ -71,11 +76,33 @@ async def main(
     Returns:
         None
     """
-    openai_client = AsyncAzureOpenAI(
-        api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
-        azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-        api_key=os.getenv("AZURE_OPENAI_KEY"),
-    )
+    if openai_model in [
+        "DeepSeek-V3.2",
+        "gpt-oss-120b",
+        "grok-4-20-reasoning",
+        "Llama-4-Maverick-17B-128E-Instruct-FP8",
+    ]:
+        openai_endpoint = os.getenv("AZURE_OSS_ENDPOINT")
+        openai_key = os.getenv("AZURE_OSS_KEY")
+
+        openai_client = AzureAIOpenAIApiChatModel(
+            endpoint=openai_endpoint,
+            credential=openai_key,
+            model=openai_model,
+            temperature=1.0,
+            max_tokens=16384,
+            use_responses_api=False,
+            api_version="v1",
+        )
+    else:
+        openai_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+        openai_key = os.getenv("AZURE_OPENAI_KEY")
+
+        openai_client = AsyncAzureOpenAI(
+            api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
+            azure_endpoint=openai_endpoint,
+            api_key=openai_key,
+        )
 
     print("✅ Clients initialized successfully")
 
@@ -92,8 +119,24 @@ async def main(
     print(f"   Exists: {'✅' if os.path.exists(document_ranking_path) else '❌'}")
 
     current_timestamp = run_idx + "_" + datetime.now().strftime("%Y%m%d_%H%M%S")
-    chunk_ranking_output_dir = os.path.join("./llm_output/chunk_output", current_timestamp)
-    document_ranking_output_dir = os.path.join("./llm_output/doc_output", current_timestamp)
+    chunk_ranking_output_dir = os.path.join("./finagentbench/chunk_output", current_timestamp)
+    document_ranking_output_dir = os.path.join("./finagentbench/doc_output", current_timestamp)
+
+    doc_metrics_tracker = MetricsTracker(output_dir=document_ranking_output_dir)
+    doc_run_dir = doc_metrics_tracker.create_run_directory(
+        model=openai_model,
+        eval_mode="doc_ranking",
+        prompt_version=doc_prompt_version,
+        use_icl=use_doc_icl,
+    )
+
+    chunk_metrics_tracker = MetricsTracker(output_dir=chunk_ranking_output_dir)
+    chunk_run_dir = chunk_metrics_tracker.create_run_directory(
+        model=openai_model,
+        eval_mode="chunk_ranking",
+        prompt_version=chunk_prompt_version,
+        use_icl=use_chunk_icl,
+    )
 
     if dry_run:
         submission_file_name = f"{current_timestamp}_dry_run_kaggle_submission.csv"
@@ -133,13 +176,13 @@ async def main(
 
         document_agents = initialize_document_agents(
             openai_client=openai_client,
-            openai_model=os.getenv("AZURE_OPENAI_MODEL"),
+            openai_model=openai_model,
             doc_rank_sys_prompt_version=doc_prompt_version,
         )
         chunk_agents = initialize_chunk_agents(
             agentic_version=agentic_version,
             openai_client=openai_client,
-            openai_model=os.getenv("AZURE_OPENAI_MODEL"),
+            openai_model=openai_model,
             chunk_rank_sys_prompt_version=chunk_prompt_version,
         )
         doc_graph, chunk_graph = initialize_langgraph_workflows(agentic_version=agentic_version)
@@ -160,8 +203,8 @@ async def main(
             document_agents=document_agents,
             agentic_version=agentic_version,
             chunk_agents=chunk_agents,
-            azure_openai_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-            azure_openai_key=os.getenv("AZURE_OPENAI_KEY"),
+            azure_openai_endpoint=openai_endpoint,
+            azure_openai_key=openai_key,
         )
     else:
         print("\n" + "=" * 60)
@@ -169,7 +212,7 @@ async def main(
         print("=" * 60)
         chunk_task = evaluate_chunk_ranking(
             openai_client=openai_client,
-            openai_model=os.getenv("AZURE_OPENAI_MODEL"),
+            openai_model=openai_model,
             training_data_path=chunk_training_data_path,
             data_path=chunk_ranking_path,
             semaphore=semaphore,
@@ -177,19 +220,19 @@ async def main(
             dry_run=dry_run,
             user_prompt_json_path="./prompts/user.json",
             chunk_prompt_version=chunk_prompt_version,
-            azure_openai_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-            azure_openai_key=os.getenv("AZURE_OPENAI_KEY"),
             use_icl=use_chunk_icl,
             icl_n=icl_n,
             chunk_n_splits=chunk_n_splits,
             chunk_per_split_prompt_k=chunk_per_split_prompt_k,
             chunk_per_split_extract_k=chunk_per_split_extract_k,
             chunk_final_k=top_k,
+            metrics_tracker=chunk_metrics_tracker,
+            run_dir=chunk_run_dir,
         )
 
         doc_task = evaluate_document_ranking(
             openai_client=openai_client,
-            openai_model=os.getenv("AZURE_OPENAI_MODEL"),
+            openai_model=openai_model,
             training_data_path=document_training_data_path,
             data_path=document_ranking_path,
             semaphore=semaphore,
@@ -197,10 +240,10 @@ async def main(
             dry_run=dry_run,
             top_k=top_k,
             doc_prompt_version=doc_prompt_version,
-            azure_openai_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-            azure_openai_key=os.getenv("AZURE_OPENAI_KEY"),
             use_icl=use_doc_icl,
             icl_n=icl_n,
+            metrics_tracker=doc_metrics_tracker,
+            run_dir=doc_run_dir,
         )
 
         # Wait for both evaluations to complete
@@ -252,17 +295,18 @@ async def main(
 
 
 if __name__ == "__main__":
-    dry_run = True
-    use_doc_icl = True
-    icl_n = 5
-    use_chunk_icl = True
-    agentic_workflow = True
-    agentic_version = 4
+    dry_run = False
+    openai_model = "grok-4-20-reasoning"
+    use_doc_icl = True  # Best config: True
+    icl_n = 5  # Best config: 5
+    use_chunk_icl = False  # Best config: False
+    agentic_workflow = False  # Best config: False
+    agentic_version = 4  # Best config: 4
     agent_concurrency = 2
-    doc_prompt_version = "v4"
-    chunk_prompt_version = "v4"
+    doc_prompt_version = "v4"  # Best config: v4
+    chunk_prompt_version = "v4"  # Best config: v4
     run_idx = "2"
-    top_k = 5
+    top_k = 5  # Best config: 5
     chunk_n_splits = 5
     chunk_per_split_prompt_k = 10
     chunk_per_split_extract_k = 10
@@ -271,6 +315,7 @@ if __name__ == "__main__":
     asyncio.run(
         main(
             dry_run=dry_run,
+            openai_model=openai_model,
             use_doc_icl=use_doc_icl,
             use_chunk_icl=use_chunk_icl,
             icl_n=icl_n,

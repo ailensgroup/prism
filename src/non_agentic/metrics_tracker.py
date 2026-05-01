@@ -93,22 +93,47 @@ class MetricsTracker:
         return run_dir
 
     def record_metric(self, metric: APICallMetrics) -> None:
-        """Record a single API call metric."""
+        """Record a single API call metric, skipping duplicates by question_id."""
+        existing_ids = {m.question_id for m in self.current_run_metrics}
+        if metric.question_id in existing_ids:
+            suffix = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            metric.question_id = f"{metric.question_id}_{suffix}"
         self.current_run_metrics.append(metric)
 
     def save_run_metrics(self, run_dir: Path, filename: str = "metrics.json") -> Path:
         """Save API call metric."""
         output_file = run_dir / filename
-        metrics_data = [asdict(m) for m in self.current_run_metrics]
-        summary = self._calculate_summary(self.current_run_metrics)
+
+        # --- Load existing metrics from disk (if any) ---
+        existing_metrics: list[dict] = []
+        if output_file.exists():
+            try:
+                with open(output_file) as f:
+                    existing_data = json.load(f)
+                existing_metrics = existing_data.get("detailed_metrics", [])
+                print(f"📂 Loaded {len(existing_metrics)} existing metrics from {output_file}")
+            except (json.JSONDecodeError, KeyError) as e:
+                print(f"⚠️  Could not read existing metrics file, starting fresh: {e}")
+
+        # --- Merge: existing records on disk + current in-memory records ---
+        existing_by_id: dict[str, dict] = {m["question_id"]: m for m in existing_metrics}
+        for m in self.current_run_metrics:
+            existing_by_id[m.question_id] = asdict(m)  # overwrites stale disk entry if re-run
+
+        merged_metrics = list(existing_by_id.values())
+
+        # --- Rebuild summary over the full merged set ---
+        merged_dataclasses = [APICallMetrics(**m) for m in merged_metrics]
+        summary = self._calculate_summary(merged_dataclasses)
+
         output = {
             "run_info": {
-                "total_calls": len(self.current_run_metrics),
+                "total_calls": len(merged_metrics),
                 "timestamp": datetime.now().isoformat(),
                 "output_directory": str(run_dir),
             },
             "summary": summary,
-            "detailed_metrics": metrics_data,
+            "detailed_metrics": merged_metrics,
         }
 
         # Write to a temp file first, then atomically replace the real file
@@ -118,7 +143,7 @@ class MetricsTracker:
 
         tmp_path.replace(output_file)  # atomic on most OS/filesystems
 
-        print(f"Saved {len(metrics_data)} metrics to {output_file}")
+        print(f"Saved {len(merged_metrics)} metrics to {output_file}")
         return output_file
 
     def _calculate_summary(self, metrics: list[APICallMetrics]) -> dict:
@@ -162,6 +187,27 @@ class MetricsTracker:
 
         metrics_dicts = [asdict(m) for m in self.current_run_metrics]
         df = pd.DataFrame(metrics_dicts)
+
+        selected_columns = [
+            "start_time",
+            "end_time",
+            "question_id",
+            "eval_mode",
+            "model",
+            "prompt_version",
+            "use_icl",
+            "input_tokens",
+            "output_tokens",
+            "total_tokens",
+            "processing_time_seconds",
+            "retrieved_documents_count",
+            "api_call_type",
+            "success",
+            "error_message",
+            "estimated_cost_usd",
+        ]
+
+        df = df[[col for col in selected_columns if col in df.columns]]
 
         output_file = run_dir / filename
         df.to_csv(output_file, index=False)

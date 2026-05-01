@@ -14,8 +14,8 @@ from langchain_core.messages import HumanMessage, messages_to_dict
 from langchain_core.vectorstores import VectorStoreRetriever
 from langchain_openai import AzureChatOpenAI
 
-from src.non_agentic.financebench.metrics_tracker import APICallMetrics, MetricsTracker, estimate_cost
 from src.non_agentic.fiqa.evaluation_utils import calculate_ndcg, calculate_recall
+from src.non_agentic.metrics_tracker import APICallMetrics, MetricsTracker, estimate_cost
 from src.non_agentic.utils import get_sys_prompt
 
 load_dotenv()
@@ -184,7 +184,6 @@ async def get_fiqa_ranking(
     query_id: str = "unknown",
     max_retries: int = 3,
     timeout_seconds: int = 240,
-    run_dir: str | None = None,
 ) -> tuple[dict[str, int], list[str], str, str]:
     """Get document rankings from LLM for a FiQA query."""
     start_time = time.perf_counter()
@@ -264,6 +263,13 @@ async def get_fiqa_ranking(
                     llm.ainvoke([HumanMessage(content=full_prompt)]),
                     timeout=timeout_seconds,
                 )
+
+                answer = response.content if hasattr(response, "content") else str(response)
+                try:
+                    raw_response_str = json.dumps(messages_to_dict([response])[0])
+                except (AttributeError, TypeError):
+                    raw_response_str = json.dumps({"type": "ai", "content": answer})
+
                 raw_response_str = json.dumps(messages_to_dict([response])[0])
                 answer = response.content
                 print(f"Got response ({len(answer)} chars)")
@@ -357,10 +363,6 @@ async def get_fiqa_ranking(
             )
             metrics_tracker.record_metric(metric)
 
-            if run_dir:
-                metrics_tracker.save_run_metrics(run_dir)
-                metrics_tracker.export_summary_csv(run_dir)
-
     except Exception as e:
         processing_time = time.perf_counter() - start_time
         error_message = str(e)
@@ -369,7 +371,7 @@ async def get_fiqa_ranking(
 
         if metrics_tracker and query_id:
             metric = APICallMetrics(
-                start_time=start_time.isoformat(),
+                start_time=start_time_dt.isoformat(),
                 end_time=datetime.now().isoformat(),
                 timestamp=datetime.now().isoformat(),
                 question_id=query_id,
@@ -393,10 +395,6 @@ async def get_fiqa_ranking(
                 estimated_cost_usd=0.0,
             )
             metrics_tracker.record_metric(metric)
-
-            if run_dir:
-                metrics_tracker.save_run_metrics(run_dir)
-                metrics_tracker.export_summary_csv(run_dir)
 
         return {}, [], "", f"Error: {error_message}", str(e)
 

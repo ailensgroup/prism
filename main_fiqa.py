@@ -12,9 +12,9 @@ from langchain_core.vectorstores import VectorStoreRetriever
 from langchain_openai import AzureOpenAIEmbeddings
 
 from src.icl_message_builder import ICLMessageBuilder
-from src.non_agentic.financebench.metrics_tracker import MetricsTracker
 from src.non_agentic.financebench.vector_store import build_vectorstore_retriever_fiqa
 from src.non_agentic.fiqa.utils import evaluate_fiqa_results, get_fiqa_ranking
+from src.non_agentic.metrics_tracker import MetricsTracker
 
 load_dotenv()
 
@@ -32,7 +32,6 @@ async def process_single_query(
     retriever: VectorStoreRetriever,
     metrics_tracker: MetricsTracker,
     semaphore: Semaphore,
-    run_dir: str | None = None,
 ) -> dict:
     """Process a single query with rate limiting via semaphore."""
     async with semaphore:
@@ -60,7 +59,6 @@ async def process_single_query(
                 retriever=retriever,
                 metrics_tracker=metrics_tracker,
                 query_id=query_id,
-                run_dir=run_dir,
             )
 
         except Exception as e:
@@ -70,6 +68,7 @@ async def process_single_query(
             ranked_doc_ids = []
             answer = None
             justification = f"Error: {e!s}"
+            raw_response_str = ""
 
         return {
             "query_id": query_id,
@@ -139,7 +138,6 @@ async def process_queries_parallel(
             retriever,
             metrics_tracker,
             semaphore,
-            run_dir,
         )
         for query in pending_queries
     ]
@@ -149,11 +147,15 @@ async def process_queries_parallel(
         result = await coro
         results.append(result)
 
-        # Periodic saves
-        if idx % save_interval == 0:
+        if (idx + 1) % save_interval == 0:
             df_results = pd.DataFrame(results)
             df_results.to_csv(results_file, index=False)
             print(f"\nSaved intermediate results ({idx}/{len(queries)} queries)")
+
+            if run_dir:
+                metrics_tracker.save_run_metrics(run_dir)
+                metrics_tracker.export_summary_csv(run_dir)
+                print(f"Saved metrics snapshot ({idx + 1} queries)")
 
     return results
 
@@ -240,13 +242,7 @@ async def main(
         icl_builder = None
         if use_icl:
             print("\n🤖 Initializing ICL Message Builder...")
-            icl_builder = ICLMessageBuilder(
-                training_data_path=processed_train_file,
-                document_type="fiqa",
-                icl_n=icl_n,
-                azure_openai_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],  # Fix openai due to embedding class
-                azure_openai_key=os.environ["AZURE_OPENAI_KEY"],  # Fix openai due to embedding class
-            )
+            icl_builder = ICLMessageBuilder(training_data_path=processed_train_file, document_type="fiqa", icl_n=icl_n)
             print("ICL builder initialized")
 
         print("🔍 Checking for required data files...")
@@ -385,7 +381,7 @@ if __name__ == "__main__":
         azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
         azure_key = os.getenv("AZURE_OPENAI_KEY")
 
-    use_icls = [True, False]
+    use_icls = [False]
     prompt_versions = ["v4"]
 
     # Fixed settings
@@ -413,7 +409,7 @@ if __name__ == "__main__":
                 run_idx=run_idx,
                 evaluate_only=evaluate_only,
                 output_dir=output_dir,
-                max_concurrent=5,  # Control rate limit
+                max_concurrent=2,  # Control rate limit
                 search_number=300,  # Control context length
             )
         )

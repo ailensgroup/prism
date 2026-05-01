@@ -319,9 +319,7 @@ async def evaluate_document_ranking_multi_agent(
     icl_builder = ICLMessageBuilder(
         training_data_path=training_data_path,
         icl_n=icl_n,
-        document_type="document",
-        azure_openai_endpoint=azure_openai_endpoint,
-        azure_openai_key=azure_openai_key,
+        document_type="document"
     )
 
     # Print the data path being used

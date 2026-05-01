@@ -3,10 +3,12 @@ import os
 import re
 import traceback
 
+from langchain_azure_ai.chat_models import AzureAIOpenAIApiChatModel
 from openai import AsyncAzureOpenAI
 from tqdm.asyncio import tqdm
 
 from src.icl_message_builder import ICLMessageBuilder
+from src.non_agentic.metrics_tracker import MetricsTracker
 from src.non_agentic.utils import (
     extract_ranking_from_response,
     get_model_response,
@@ -133,6 +135,8 @@ async def rank_chunks_across_splits(
     output_dir: str | None = None,
     user_prompt_json_path: str | None = None,
     chunk_prompt_version: str | None = None,
+    metrics_tracker: MetricsTracker | None = None,
+    run_dir: str | None = None,
 ) -> list[int]:
     """Rank chunks using an N-way split-and-merge strategy.
 
@@ -171,6 +175,9 @@ async def rank_chunks_across_splits(
             Defaults to None.
         chunk_prompt_version (str | None, optional): Version key selecting the
             chunk-ranking prompt template. Defaults to None.
+        metrics_tracker (MetricsTracker | None, optional): Optional metrics tracker
+            instance to log request/response details for monitoring. Defaults to None.
+        run_dir (str | None, optional): Optional directory name for this run, used in logging/artifact naming. Defaults to None.
 
     Returns:
         list[int]: The predicted ranking (length == ``chunk_final_k``) of ORIGINAL chunk
@@ -209,6 +216,8 @@ async def rank_chunks_across_splits(
         )
         messages = [{"role": "user", "content": prompt}]
 
+        print(f"Processing split {split_i + 1} chunk...")
+
         # chunk_id: keep your sequencing: 1..n_splits for splits, final is n_splits+1 below
         response = await get_model_response(
             openai_client=openai_client,
@@ -222,6 +231,7 @@ async def rank_chunks_across_splits(
             output_dir=output_dir,
             chunk_id=split_i + 1,
             chunk_prompt_version=chunk_prompt_version,
+            metrics_tracker=metrics_tracker,
         )
 
         extract_k = min(chunk_per_split_extract_k, len(split_chunks))
@@ -263,6 +273,7 @@ async def rank_chunks_across_splits(
         output_dir=output_dir,
         chunk_id=chunk_n_splits + 1,  # continues your sequence
         chunk_prompt_version=chunk_prompt_version,
+        metrics_tracker=metrics_tracker,
     )
     return extract_ranking_from_response(final_response, final_k_eff)
 
@@ -281,6 +292,8 @@ async def process_chunk_ranking_two_stage(
     chunk_per_split_prompt_k: int = 10,
     chunk_per_split_extract_k: int = 10,
     chunk_final_k: int = 5,
+    metrics_tracker: MetricsTracker | None = None,
+    run_dir: str | None = None,
 ) -> list[int]:
     """Process chunk ranking with a two-stage approach for high token-count prompts.
 
@@ -293,6 +306,8 @@ async def process_chunk_ranking_two_stage(
         openai_client (AsyncAzureOpenAI): Asynchronous OpenAI/Azure client used
             for model calls.
         openai_model (str): Name of the OpenAI/Azure model to use for ranking.
+        openai_endpoint (str): Endpoint URL for the OpenAI/Azure service.
+        openai_key (str): API key for authenticating with the OpenAI/Azure service
         icl_messages (list[dict]): In-context learning examples/messages to prepend.
         messages (list[dict]): The chat/prompt messages that include the question
             and chunk text (with headers like ``[Chunk Index N]``).
@@ -309,6 +324,9 @@ async def process_chunk_ranking_two_stage(
         chunk_per_split_extract_k (int, optional): Number of top candidates extracted
             from each split. Defaults to 10.
         chunk_final_k (int, optional): Number of indices to return from the final stage.
+        metrics_tracker (MetricsTracker | None, optional): Optional metrics tracker
+            instance to log request/response details for monitoring. Defaults to None.
+        run_dir (str | None, optional): Optional directory name for this run, used in logging/artifact naming. Defaults to None.
 
     Returns:
         list[int]: Ranked chunk indices (e.g., top-10), ordered from most to least
@@ -367,11 +385,14 @@ async def process_chunk_ranking_two_stage(
                 task_type="chunk_ranking",
                 query_id=query_id,
                 output_dir=output_dir,
-                chunk_id=1,
+                chunk_id=999,
                 chunk_prompt_version=chunk_prompt_version,
+                metrics_tracker=metrics_tracker,
+                run_dir=run_dir,
             )
             predicted_ranking = extract_ranking_from_response(response, 10)
         else:
+            print("Calling two-stage chunk ranking process for high token count case...")
             predicted_ranking = await rank_chunks_across_splits(
                 icl_messages=icl_messages,
                 openai_client=openai_client,
@@ -388,7 +409,14 @@ async def process_chunk_ranking_two_stage(
                 output_dir=output_dir,
                 user_prompt_json_path=user_prompt_json_path,
                 chunk_prompt_version=chunk_prompt_version,
+                metrics_tracker=metrics_tracker,
+                run_dir=run_dir,
             )
+
+            # Save only after a question is successfully parsed and processed through the two-stage flow
+            if metrics_tracker is not None and run_dir:
+                metrics_tracker.save_run_metrics(run_dir)
+                metrics_tracker.export_summary_csv(run_dir)
 
         return predicted_ranking
     except Exception as e:
@@ -398,7 +426,7 @@ async def process_chunk_ranking_two_stage(
 
 
 async def evaluate_chunk_ranking(
-    openai_client: AsyncAzureOpenAI,
+    openai_client: AsyncAzureOpenAI | AzureAIOpenAIApiChatModel,
     openai_model: str,
     training_data_path: str,
     data_path: str,
@@ -407,14 +435,14 @@ async def evaluate_chunk_ranking(
     dry_run: bool = False,
     user_prompt_json_path: str = "./prompts/user.json",
     chunk_prompt_version: str = "v4",
-    azure_openai_endpoint: str = "dummy_endpoint",
-    azure_openai_key: str = "dummy_key",
     use_icl: bool = True,
     icl_n: int = 5,
     chunk_n_splits: int = 5,
     chunk_per_split_prompt_k: int = 10,
     chunk_per_split_extract_k: int = 10,
     chunk_final_k: int = 5,
+    metrics_tracker: MetricsTracker | None = None,
+    run_dir: str | None = None,
 ) -> list[dict]:
     """Evaluate the chunk-ranking task and return submission-ready records.
 
@@ -439,10 +467,6 @@ async def evaluate_chunk_ranking(
         chunk_prompt_version (str, optional): Version key (e.g., ``"v1"``,
             ``"v2"``) selecting the chunk-ranking prompt template. Defaults to
             ``"v4"``.
-        azure_openai_endpoint (str, optional): Azure OpenAI endpoint URL. Defaults to
-            ``"dummy_endpoint"``.
-        azure_openai_key (str, optional): Azure OpenAI API key. Defaults to
-            ``"dummy_key"``.
         use_icl (bool, optional): Whether to use in-context learning examples.
             Defaults to True.
         icl_n (int, optional): Number of in-context learning examples to retrieve.
@@ -454,6 +478,9 @@ async def evaluate_chunk_ranking(
         chunk_per_split_extract_k (int, optional): Number of top candidates extracted
             from each split. Defaults to 10.
         chunk_final_k (int, optional): Number of indices to return from the final stage.
+        metrics_tracker (MetricsTracker | None, optional): Optional metrics tracker
+            instance to log request/response details for monitoring. Defaults to None.
+        run_dir (str | None, optional): Optional directory name for this run, used in logging/artifact naming. Defaults to None.
 
     Returns:
         list[dict]: A list of submission records. Each record typically includes
@@ -464,13 +491,7 @@ async def evaluate_chunk_ranking(
 
     if use_icl:
         print("🤖 Initializing ICL Message Builder...")
-        icl_builder = ICLMessageBuilder(
-            training_data_path=training_data_path,
-            document_type="chunk",
-            icl_n=icl_n,
-            azure_openai_endpoint=azure_openai_endpoint,
-            azure_openai_key=azure_openai_key,
-        )
+        icl_builder = ICLMessageBuilder(training_data_path=training_data_path, document_type="chunk", icl_n=icl_n)
 
         # Print the data path being used
         print(f"📁 Data path provided: {data_path}")
@@ -510,6 +531,8 @@ async def evaluate_chunk_ranking(
             chunk_per_split_prompt_k=chunk_per_split_prompt_k,
             chunk_per_split_extract_k=chunk_per_split_extract_k,
             chunk_final_k=chunk_final_k,
+            metrics_tracker=metrics_tracker,
+            run_dir=run_dir,
         )
         tasks.append((task, query_id))
 
@@ -526,4 +549,6 @@ async def evaluate_chunk_ranking(
 
     print(f"✅ Completed {len(results_list)} chunk ranking tasks")
     print(f"📊 Generated {len(submission_data)} submission entries")
+    metrics_tracker.save_run_metrics(run_dir)
+    metrics_tracker.export_summary_csv(run_dir)
     return submission_data

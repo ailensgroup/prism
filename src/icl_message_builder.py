@@ -3,9 +3,12 @@ import os
 import random
 import re
 
+from dotenv import load_dotenv
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
 from langchain_openai import AzureOpenAIEmbeddings
+
+load_dotenv()
 
 
 class ICLMessageBuilder:
@@ -31,8 +34,6 @@ class ICLMessageBuilder:
         vector_store_path: str = "./embedding",
         document_type: str = "chunk",
         icl_n: int = 5,
-        azure_openai_endpoint: str = "dummy_endpoint",
-        azure_openai_key: str = "dummy_key",
     ) -> None:
         """Initialize the ICLMessageBuilder and prepare the vector store.
 
@@ -63,8 +64,8 @@ class ICLMessageBuilder:
         )
 
         self.embeddings = AzureOpenAIEmbeddings(
-            api_key=azure_openai_key,
-            azure_endpoint=azure_openai_endpoint,
+            api_key=os.getenv("AZURE_OPENAI_KEY"),
+            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
             api_version="2024-02-01",
             model=embedding_model,
             azure_deployment="text-embedding-3-small",

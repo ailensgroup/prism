@@ -29,8 +29,6 @@ async def evaluate_chunk_ranking_multi_agent(
     chunk_agents: dict[str, BaseRoleAgent],
     resume_from: str | None = None,
     run_id: str | None = None,
-    azure_openai_endpoint: str = "dummy_endpoint",
-    azure_openai_key: str = "dummy_key",
     dry_run: bool = False,
     use_icl: bool = True,
     icl_n: int = 5,
@@ -84,9 +82,7 @@ async def evaluate_chunk_ranking_multi_agent(
     icl_builder = ICLMessageBuilder(
         training_data_path=training_data_path,
         icl_n=icl_n,
-        document_type="chunk",
-        azure_openai_endpoint=azure_openai_endpoint,
-        azure_openai_key=azure_openai_key,
+        document_type="chunk"
     )
 
     # Print the data path being used

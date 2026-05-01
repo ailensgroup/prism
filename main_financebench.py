@@ -21,9 +21,9 @@ from src.non_agentic.financebench.configs import (
     PROCESSED_PATH_DATASET_JSONL,
 )
 from src.non_agentic.financebench.evaluate_answer import evaluate_financebench_answers
-from src.non_agentic.financebench.metrics_tracker import MetricsTracker
 from src.non_agentic.financebench.utils import get_answer_with_retry, get_baseline
 from src.non_agentic.financebench.vector_store import build_vectorstore_retriever, get_pdf_text
+from src.non_agentic.metrics_tracker import MetricsTracker
 
 load_dotenv()
 
@@ -215,8 +215,6 @@ async def main(
                 training_data_path=PROCESSED_PATH_DATASET_JSONL,
                 document_type="financebench",
                 icl_n=icl_n,
-                azure_openai_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-                azure_openai_key=os.getenv("AZURE_OPENAI_KEY"),
             )
             sample_per_question_type = math.ceil(icl_n / 3)
             icl_messages = icl_builder.get_icl_for_financebench(samples_per_type=sample_per_question_type)

@@ -1,16 +1,18 @@
 import asyncio
 import os
 
+from langchain_azure_ai.chat_models import AzureAIOpenAIApiChatModel
 from openai import AsyncAzureOpenAI
 from tqdm.asyncio import tqdm
 
 from src.icl_message_builder import ICLMessageBuilder
+from src.non_agentic.metrics_tracker import MetricsTracker
 from src.non_agentic.utils import extract_ranking_from_response, get_model_response, load_evaluation_data
 from src.schema import Format
 
 
 async def process_doc_ranking(
-    openai_client: AsyncAzureOpenAI,
+    openai_client: AsyncAzureOpenAI | AzureAIOpenAIApiChatModel,
     openai_model: str,
     icl_messages: list[dict],
     messages: list[dict],
@@ -19,6 +21,8 @@ async def process_doc_ranking(
     query_id: str,
     output_dir: str,
     doc_prompt_version: str = "v4",
+    metrics_tracker: MetricsTracker | None = None,
+    run_dir: str | None = None,
 ) -> list[int]:
     """Process a single evaluation item to produce a ranked list of document indices.
 
@@ -38,6 +42,9 @@ async def process_doc_ranking(
         output_dir (str): Directory for any outputs or artifacts produced.
         doc_prompt_version (str, optional): Version key for selecting the document
             ranking prompt template. Defaults to ``"v4"``.
+        metrics_tracker (MetricsTracker | None, optional): Optional metrics
+            tracker instance to log request/response details for monitoring. Defaults to ``None``.
+        run_dir (str | None, optional): Optional directory name for this run, used in logging/artifact naming.
 
     Returns:
         list[int]: Ranked document indices (length == ``top_k``) in descending
@@ -57,6 +64,8 @@ async def process_doc_ranking(
             output_dir=output_dir,
             chunk_id=1,
             doc_prompt_version=doc_prompt_version,
+            metrics_tracker=metrics_tracker,
+            run_dir=run_dir,
         )
 
         # Extract ranking from response
@@ -68,7 +77,7 @@ async def process_doc_ranking(
 
 
 async def evaluate_document_ranking(
-    openai_client: AsyncAzureOpenAI,
+    openai_client: AsyncAzureOpenAI | AzureAIOpenAIApiChatModel,
     openai_model: str,
     training_data_path: str,
     data_path: str,
@@ -77,10 +86,10 @@ async def evaluate_document_ranking(
     dry_run: bool = False,
     top_k: int = 10,
     doc_prompt_version: str = "v4",
-    azure_openai_endpoint: str = "dummy_endpoint",
-    azure_openai_key: str = "dummy_key",
     use_icl: bool = True,
     icl_n: int = 5,
+    metrics_tracker: MetricsTracker | None = None,
+    run_dir: str | None = None,
 ) -> list[dict]:
     """Evaluate the document-ranking task and return submission-ready records.
 
@@ -112,6 +121,9 @@ async def evaluate_document_ranking(
             Defaults to True.
         icl_n (int, optional): Number of in-context learning examples to retrieve.
             Defaults to 5.
+        metrics_tracker (MetricsTracker | None, optional): Optional metrics
+            tracker instance to log request/response details for monitoring. Defaults to ``None``.
+        run_dir (str | None, optional): Optional directory name for this run, used in logging/artifact naming.
 
     Returns:
         list[dict]: A list of records suitable for submission. Each record
@@ -123,13 +135,7 @@ async def evaluate_document_ranking(
 
     if use_icl:
         print("🤖 Initializing ICL Message Builder...")
-        icl_builder = ICLMessageBuilder(
-            training_data_path=training_data_path,
-            document_type="document",
-            icl_n=icl_n,
-            azure_openai_endpoint=azure_openai_endpoint,
-            azure_openai_key=azure_openai_key,
-        )
+        icl_builder = ICLMessageBuilder(training_data_path=training_data_path, document_type="document", icl_n=icl_n)
 
         # Print the data path being used
         print(f"📁 Data path provided: {data_path}")
@@ -164,6 +170,8 @@ async def evaluate_document_ranking(
             query_id=query_id,
             output_dir=output_dir,
             doc_prompt_version=doc_prompt_version,
+            metrics_tracker=metrics_tracker,
+            run_dir=run_dir,
         )
         tasks.append((task, query_id))
 

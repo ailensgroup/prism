@@ -6,9 +6,13 @@ import traceback
 from datetime import datetime
 from functools import lru_cache
 
+from langchain_azure_ai.chat_models import AzureAIOpenAIApiChatModel
+from langchain_core.messages import HumanMessage, SystemMessage, messages_to_dict
 from openai import AsyncAzureOpenAI
 
 from src.schema import Format
+
+from .metrics_tracker import APICallMetrics, MetricsTracker, estimate_cost
 
 
 def load_evaluation_data(file_path: str, dry_run: bool) -> list[dict]:
@@ -150,8 +154,125 @@ def parse_query_from_prompt(prompt: str) -> str:
         return ""
 
 
-async def get_model_response(
+async def _invoke_openai_client(
+    openai_model: str,
     openai_client: AsyncAzureOpenAI,
+    full_messages: list[dict],
+    schema: type[Format],
+    task_type: str,
+    query_id: str,
+    chunk_id: int,
+    current_timestamp: str,
+    output_dir: str,
+) -> tuple[list[int], int, int, int, str, str, object]:
+    """Call AsyncAzureOpenAI.
+
+    return (result, input_tokens, output_tokens total_tokens, output_response, output_raw, response_object).
+    """
+    response_format = Format if task_type == "chunk_ranking" else schema
+    extra_kwargs = {"verbosity": "low"} if task_type == "chunk_ranking" else {}
+
+    response = await openai_client.chat.completions.parse(
+        messages=full_messages,
+        model=openai_model,
+        max_completion_tokens=16384,
+        temperature=1.0,
+        top_p=1.0,
+        response_format=response_format,
+        **extra_kwargs,
+    )
+
+    # Uncomment below to save raw response and prompt for debugging
+    # with open(os.path.join(output_dir, f"prompt_{query_id}_{chunk_id}_{current_timestamp}.json"), "a") as f:
+    #     json.dump({"system": full_messages[0], "user": full_messages[1]}, f, indent=2)
+    # with open(os.path.join(output_dir, f"{query_id}_{chunk_id}_{current_timestamp}.json"), "w") as f:
+    #     json.dump(response.model_dump(), f, indent=2)
+
+    usage = getattr(response, "usage", None)
+    input_tokens = getattr(usage, "prompt_tokens", 0) if usage else 0
+    output_tokens = getattr(usage, "completion_tokens", 0) if usage else 0
+    total_tokens = getattr(usage, "total_tokens", 0) if usage else 0
+    choice = response.choices[0] if response.choices else None
+    output_response = str(getattr(choice.message, "parsed", "")) if choice else ""
+    output_raw = str(getattr(choice.message, "content", "")) if choice else ""
+    result = response.choices[0].message.parsed.answer
+
+    return result, input_tokens, output_tokens, total_tokens, output_response, output_raw, response
+
+
+async def _invoke_langchain_client(
+    openai_model: str,
+    openai_client: AzureAIOpenAIApiChatModel,
+    full_messages: list[dict],
+    query_id: str,
+    chunk_id: int,
+    current_timestamp: str,
+    output_dir: str,
+    timeout_seconds: int = 120,
+) -> tuple[list[int], int, int, int, str, str]:
+    """Call AzureAIOpenAIApiChatModel via .ainvoke().
+
+    return (result, input_tokens, output_tokens, total_tokens, output_response, output_raw).
+    Since LangChain has no .parse() equivalent, the model must be prompted to return
+    JSON matching Format, and we parse it manually here.
+    """
+    print(f"Processing Model: {openai_model}")
+    lc_messages = []
+    for m in full_messages:
+        if m["role"] == "system":
+            lc_messages.append(SystemMessage(content=m["content"]))
+        else:
+            lc_messages.append(HumanMessage(content=m["content"]))
+
+    response = await asyncio.wait_for(
+        openai_client.ainvoke(lc_messages),
+        timeout=timeout_seconds,
+    )
+
+    raw_content = response.content
+    output_response = raw_content
+
+    try:
+        raw_response_str = json.dumps(messages_to_dict([response])[0])
+    except (AttributeError, TypeError):
+        raw_response_str = json.dumps({"type": "ai", "content": raw_content})
+
+    output_raw = raw_response_str
+
+    # ── Manual JSON parsing since there's no .parse() ────────────────────
+    try:
+        cleaned = raw_content.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+
+        # Handle case where model returns a raw array instead of {"answer": [...]}
+        if cleaned.startswith("["):
+            parsed_list = json.loads(cleaned)
+            result = parsed_list
+        else:
+            parsed = Format.model_validate_json(cleaned)
+            result = parsed.answer
+
+    except Exception as e:
+        print(f"⚠️ Failed to parse LangChain response as Format: {e}\nRaw: {raw_content}")
+        result = []
+    # ─────────────────────────────────────────────────────────────────────
+
+    # LangChain exposes token counts via usage_metadata
+    usage = getattr(response, "usage_metadata", None)
+    input_tokens = (usage.get("input_tokens") or 0) if usage else 0
+    output_tokens = (usage.get("output_tokens") or 0) if usage else 0
+    total_tokens = (usage.get("total_tokens") or 0) if usage else 0
+
+    # # Uncomment to save prompts and responses for debugging LangChain calls
+    # with open(os.path.join(output_dir, f"prompt_{query_id}_{chunk_id}_{current_timestamp}.json"), "a") as f:
+    #     json.dump({"system": full_messages[0], "user": full_messages[1]}, f, indent=2)
+    # with open(os.path.join(output_dir, f"{query_id}_{chunk_id}_{current_timestamp}.json"), "w") as f:
+    #     json.dump({"content": raw_content, "usage_metadata": usage}, f, indent=2)
+
+    return result, input_tokens, output_tokens, total_tokens, output_response, output_raw
+
+
+async def get_model_response(
+    openai_client: AsyncAzureOpenAI | AzureAIOpenAIApiChatModel,
     openai_model: str,
     schema: type[Format],
     icl_messages: list[dict] | None,
@@ -165,6 +286,9 @@ async def get_model_response(
     sys_prompt_json_folder: str = "./prompts/",
     doc_prompt_version: str = "v2",
     chunk_prompt_version: str = "v2",
+    metrics_tracker: MetricsTracker | None = None,
+    use_icl: bool = False,
+    run_dir: str | None = None,
 ) -> list[int]:
     """Get a ranked-list response from the model using a financial analyst system prompt.
 
@@ -200,14 +324,25 @@ async def get_model_response(
             system/prompt template. Defaults to ``"v2"``.
         chunk_prompt_version (str, optional): Version key for chunk-ranking
             system/prompt template. Defaults to ``"v2"``.
+        metrics_tracker (MetricsTracker | None, optional): Optional metrics
+            tracker instance to log request/response details for monitoring. Defaults to ``None``.
+        use_icl (bool, optional): Whether to include in-context learning examples.
+        run_dir (str | None, optional): Optional directory name for this run, used in logging/artifact naming.
 
     Returns:
         list[int]: Ranked indices parsed from the model response. Returns an empty
         list if parsing or the request fails.
     """
     async with semaphore:
+        call_start = datetime.now()
+        start_str = call_start.isoformat()
+        error_message = None
+        response = None
+        full_messages = []
         try:
             current_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            is_langchain_client = isinstance(openai_client, AzureAIOpenAIApiChatModel)
+
             if task_type == "chunk_ranking":
                 system_message = {
                     "role": "system",
@@ -217,39 +352,13 @@ async def get_model_response(
                         version=chunk_prompt_version,
                     ),
                 }
-
                 user_message = {
                     "role": "user",
                     "content": messages[0]["content"],
                 }
                 full_messages = [system_message, user_message]
-                response = await openai_client.chat.completions.parse(
-                    messages=full_messages,
-                    model=openai_model,
-                    max_completion_tokens=16384,
-                    temperature=1.0,
-                    top_p=1.0,
-                    response_format=Format,
-                    verbosity="low",
-                )
-                with open(
-                    os.path.join(
-                        output_dir,
-                        f"prompt_{query_id}_{chunk_id}_{current_timestamp}.json",
-                    ),
-                    "a",
-                ) as f:
-                    prompt_dict = {"system": system_message, "user": user_message}
-                    json.dump(prompt_dict, f, indent=2)
 
-                with open(
-                    os.path.join(output_dir, f"{query_id}_{chunk_id}_{current_timestamp}.json"),
-                    "w",
-                ) as f:
-                    json.dump(response.model_dump(), f, indent=2)
-
-                return response.choices[0].message.parsed.answer
-            if task_type == "doc_ranking":
+            elif task_type == "doc_ranking":
                 system_message = {
                     "role": "system",
                     "content": get_sys_prompt(
@@ -258,70 +367,108 @@ async def get_model_response(
                         version=doc_prompt_version,
                     ),
                 }
-
                 user_question = parse_query_from_prompt(messages[0]["content"])
-
-                # Format ICL examples from messages list
                 icl_section = None
                 if icl_messages:
                     icl_section = "\n### In-Context Learning Examples\n"
                     icl_section += "The examples scores are evaluated in range of 0-4, with 4 being most relevant.\n"
                     for msg in icl_messages:
-                        response = msg["content"]
-                        icl_section += f"{response}\n"
-
+                        icl_section += f"{msg['content']}\n"
                     icl_section += "\nUse these examples as a guide for ranking.\n"
 
                 prompt_template = get_user_prompt(user_prompt_json_path, task_type="doc")
                 if icl_section is None:
-                    prompt_template = prompt_template.replace(
-                        "{icl_section}",
-                        "",
-                    )
-                    prompt = prompt_template.format(
-                        user_question=user_question,
-                    )
+                    prompt = prompt_template.replace("{icl_section}", "").format(user_question=user_question)
                 else:
-                    prompt = prompt_template.format(
-                        icl_section=icl_section,
-                        user_question=user_question,
-                    )
-                user_message = {
-                    "role": "user",
-                    "content": prompt,
-                }
+                    prompt = prompt_template.format(icl_section=icl_section, user_question=user_question)
+
+                user_message = {"role": "user", "content": prompt}
                 full_messages = [system_message, user_message]
-                response = await openai_client.chat.completions.parse(
-                    messages=full_messages,
-                    model=openai_model,
-                    max_completion_tokens=16384,
-                    temperature=1.0,
-                    top_p=1.0,
-                    response_format=schema,
+
+            else:
+                print(f"Unsupported task_type: {task_type}")
+
+            if is_langchain_client:
+                (
+                    result,
+                    input_tokens,
+                    output_tokens,
+                    total_tokens,
+                    output_response,
+                    output_raw,
+                ) = await _invoke_langchain_client(
+                    openai_model=openai_model,
+                    openai_client=openai_client,
+                    full_messages=full_messages,
+                    query_id=query_id,
+                    chunk_id=chunk_id,
+                    current_timestamp=current_timestamp,
+                    output_dir=output_dir,
                 )
-                with open(
-                    os.path.join(
-                        output_dir,
-                        f"prompt_{query_id}_{chunk_id}_{current_timestamp}.json",
-                    ),
-                    "a",
-                ) as f:
-                    prompt_dict = {"system": system_message, "user": user_message}
-                    json.dump(prompt_dict, f, indent=2)
-
-                with open(
-                    os.path.join(output_dir, f"{query_id}_{chunk_id}_{current_timestamp}.json"),
-                    "w",
-                ) as f:
-                    json.dump(response.model_dump(), f, indent=2)
-
-                return response.choices[0].message.parsed.answer
+                response = None  # no OpenAI response object in this path
+            else:
+                (
+                    result,
+                    input_tokens,
+                    output_tokens,
+                    total_tokens,
+                    output_response,
+                    output_raw,
+                    response,
+                ) = await _invoke_openai_client(
+                    openai_model=openai_model,
+                    openai_client=openai_client,
+                    full_messages=full_messages,
+                    schema=schema,
+                    task_type=task_type,
+                    query_id=query_id,
+                    chunk_id=chunk_id,
+                    current_timestamp=current_timestamp,
+                    output_dir=output_dir,
+                )
 
         except Exception as e:
             traceback.print_exc()
             print(f"❌ Error getting model response: {e}")
-            # Return default ranking based on number of items expected
-            return []
+            error_message = str(e)
+            input_tokens = output_tokens = total_tokens = 0
+            output_response = output_raw = ""
+            result = []
+
+        if metrics_tracker is not None:
+            call_end = datetime.now()
+            print(f"📊 Recording API call metrics at {call_end}...")
+            input_prompt = "\n\n".join(m.get("content", "") for m in full_messages)
+            metric = APICallMetrics(
+                start_time=start_str,
+                end_time=call_end.isoformat(),
+                timestamp=call_end.strftime("%Y%m%d_%H%M%S"),
+                question_id=query_id,
+                question=messages[0].get("content", ""),
+                eval_mode=task_type,
+                model=openai_model,
+                prompt_version=chunk_prompt_version if task_type == "chunk_ranking" else doc_prompt_version,
+                use_icl=use_icl,
+                input_prompt=input_prompt,
+                input_tokens=input_tokens,
+                output_response=output_response,
+                output_raw_response=output_raw,
+                output_tokens=output_tokens,
+                total_tokens=total_tokens,
+                processing_time_seconds=(call_end - call_start).total_seconds(),
+                answer=str(result),
+                retrieved_documents_count=len(result) if isinstance(result, list) else 0,
+                api_call_type=f"{task_type}_chunk{chunk_id}",
+                success=error_message is None,
+                error_message=error_message,
+                estimated_cost_usd=estimate_cost(openai_model, input_tokens, output_tokens),
+            )
+            metrics_tracker.record_metric(metric)
+            if run_dir:
+                metrics_tracker.save_run_metrics(run_dir)
+                metrics_tracker.export_summary_csv(run_dir)
+
+        return result
 
 
 def extract_ranking_from_response(response: list[int], top_k: int) -> list[int]:

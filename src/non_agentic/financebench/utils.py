@@ -16,7 +16,7 @@ from langchain_openai import AzureChatOpenAI
 from openai import AsyncAzureOpenAI
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-from src.non_agentic.financebench.metrics_tracker import APICallMetrics, MetricsTracker, estimate_cost
+from src.non_agentic.metrics_tracker import APICallMetrics, MetricsTracker, estimate_cost
 from src.non_agentic.utils import get_sys_prompt
 from src.schema import FinanceBenchFormat
 

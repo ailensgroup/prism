@@ -2,6 +2,7 @@ import asyncio
 import csv
 import json
 import os
+import re
 import traceback
 from datetime import datetime
 from functools import lru_cache
@@ -200,6 +201,24 @@ async def _invoke_openai_client(
     return result, input_tokens, output_tokens, total_tokens, output_response, output_raw, response
 
 
+def extract_list_fallback(text: str) -> list[int]:
+    """Find last [ ... ] block (most likely the answer)."""
+    matches = re.findall(r"\[[^\[\]]*\]", text)
+    if not matches:
+        return []
+
+    for candidate in reversed(matches):  # try from last
+        try:
+            parsed = json.loads(candidate)
+            if isinstance(parsed, list) and all(isinstance(x, int) for x in parsed):
+                return parsed
+        except Exception as e:
+            print(f"⚠️ Failed to parse fallback response: {e}")
+            continue
+
+    return []
+
+
 async def _invoke_langchain_client(
     openai_model: str,
     openai_client: AzureAIOpenAIApiChatModel,
@@ -253,7 +272,9 @@ async def _invoke_langchain_client(
 
     except Exception as e:
         print(f"⚠️ Failed to parse LangChain response as Format: {e}\nRaw: {raw_content}")
-        result = []
+
+        # Fallback
+        result = extract_list_fallback(raw_content)
     # ─────────────────────────────────────────────────────────────────────
 
     # LangChain exposes token counts via usage_metadata

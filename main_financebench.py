@@ -373,7 +373,7 @@ async def main(
 
 if __name__ == "__main__":
     eval_modes = ["oracle"]
-    azure_model_names = ["gpt-oss-120b"]
+    azure_model_names = ["DeepSeek-V3.2", "Llama-4-Maverick-17B-128E-Instruct-FP8"]
 
     icl_n = 9
     run_idx = "2"
@@ -386,7 +386,7 @@ if __name__ == "__main__":
         output_dir = PATH_BASELINE_RESULTS
         print("Running in BASELINE mode (ICL disabled)")
     else:
-        use_icls = [True]
+        use_icls = [True, False]
         prompt_versions = ["v4"]
         output_dir = PATH_OSS_RESULTS
         print("Running in EXPERIMENT mode (ICL enabled)")
@@ -402,7 +402,7 @@ if __name__ == "__main__":
             f" use_icl={use_icl}"
         )
 
-        if azure_model_name in _AZURE_AI_FOUNDRY_MODELS:
+        if azure_model_name.lower() in _AZURE_AI_FOUNDRY_MODELS:
             print(f"Using Azure AI Foundry model: {azure_model_name}")
             azure_endpoint = os.getenv("AZURE_OSS_ENDPOINT")
             azure_key = os.getenv("AZURE_OSS_KEY")

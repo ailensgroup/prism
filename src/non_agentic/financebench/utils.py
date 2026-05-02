@@ -38,7 +38,7 @@ async def _chat_completion(
     client: AsyncAzureOpenAI | AzureAIOpenAIApiChatModel,
     model: str,
     messages: list[dict],
-    response_format: any | None = None,
+    response_format: dict | None = None,
 ) -> tuple[str, int, int, int]:
     """Unified async chat completion that works for both client types.
 
@@ -62,16 +62,23 @@ async def _chat_completion(
             print(f"Warning: Structured output failed, falling back to regular completion: {e}")
             kwargs.pop("response_format", None)
             response = await client.chat.completions.parse(**kwargs)
+            raw_response_str = json.dumps(messages_to_dict([response])[0])
 
         answer = response.choices[0].message.content
         if hasattr(response, "usage") and response.usage:
-            return answer, response.usage.prompt_tokens, response.usage.completion_tokens, response.usage.total_tokens
+            return (
+                raw_response_str,
+                answer,
+                response.usage.prompt_tokens,
+                response.usage.completion_tokens,
+                response.usage.total_tokens,
+            )
 
         # Fallback token estimation
         prompt_text = " ".join(m.get("content", "") for m in messages)
         i = int(len(prompt_text.split()) * 1.2)
         o = int(len(answer.split()) * 1.2)
-        return answer, i, o, i + o
+        return raw_response_str, answer, i, o, i + o
 
     # ── Branch 2: AzureAIOpenAIApiChatModel (LangChain) ──────────────────────
 
@@ -349,7 +356,7 @@ async def get_answer(
             chain_type_kwargs={"prompt": added_system_prompt},
         )
         result_dict = await retrieval_qa_with_retry(
-            qa=qa, query=user_content, max_retries=3, timeout_seconds=120, prompt=prompt
+            qa=qa, query=user_content, max_retries=3, timeout_seconds=300, prompt=prompt
         )
 
         answer = result_dict["answer"]

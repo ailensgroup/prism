@@ -254,7 +254,7 @@ async def main(
     all_submission_data = chunk_submission + doc_submission
 
     # Save submission CSV
-    submission_dir = f"./submission_files/{current_timestamp}"
+    submission_dir = f"./submission_files/{openai_model}/{current_timestamp}"
     if not os.path.isdir(submission_dir):
         os.makedirs(submission_dir)
     save_submission_csv(all_submission_data, os.path.join(submission_dir, submission_file_name))

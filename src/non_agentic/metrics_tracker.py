@@ -12,10 +12,12 @@ AZURE_PRICING = {
     "gpt-5": {"input": 1.25 / 1000000, "output": 10 / 1000000},
     "gpt-5.1": {"input": 1.25 / 1000000, "output": 10 / 1000000},
     "gpt-5.2": {"input": 1.75 / 1000000, "output": 14 / 1000000},
+    "deepseek-v4-flash": {"input": 0.58 / 1000000, "output": 1.68 / 1000000},
     "deepseek-v3.2": {"input": 0.58 / 1000000, "output": 1.68 / 1000000},
     "gpt-oss-120b": {"input": 0.15 / 1000000, "output": 0.60 / 1000000},
     "grok-4-20-reasoning": {"input": 3 / 1000000, "output": 15 / 1000000},
     "llama-4-maverick-17b-128e-instruct-fp8": {"input": 0.25 / 1000000, "output": 1 / 1000000},
+    "kimi-k2.6": {"input": 0.6 / 1000000, "output": 3 / 1000000},
 }
 
 

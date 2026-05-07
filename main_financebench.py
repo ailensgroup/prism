@@ -12,6 +12,7 @@ from langchain_openai import AzureOpenAIEmbeddings
 from openai import AsyncAzureOpenAI
 from tqdm import tqdm
 
+from src.cohere_embeddings import AzureCohereEmbeddings
 from src.icl_message_builder import ICLMessageBuilder
 from src.non_agentic.financebench.configs import (
     PATH_BASELINE_RESULTS,
@@ -32,6 +33,10 @@ _AZURE_AI_FOUNDRY_MODELS = {
     "gpt-oss-120b",
     "llama-4-maverick-17b-128e-instruct-fp8",
     "grok-4-20-reasoning",
+    "llama-3.3-70b-instruct",
+    "deepseek-v4-flash",
+    "deepseek-v3.2-speciale",
+    "kimi-k2.6",
 }
 
 
@@ -84,6 +89,7 @@ async def main(
     azure_openai_model: str = "gpt-4.1",
     azure_endpoint: str = "default_endpoint",
     azure_key: str = "default_key",
+    embedding_model: str = "text-embedding-3-small",
     evaluate_only: bool = False,
     output_dir: str = PATH_RESULTS,
     baseline: bool = False,
@@ -102,6 +108,8 @@ async def main(
         azure_openai_model (str, optional): Azure OpenAI model to use. Defaults to "gpt-4.1".
         azure_endpoint (str, optional): Azure OpenAI endpoint URL. Defaults to value from .env.
         azure_key (str, optional): Azure OpenAI API key. Defaults to value from .env.
+        embedding_model (str, optional): Embedding model name for vector store retrieval.
+            Defaults to "text-embedding-3-small".
         evaluate_only (bool, optional): If True, only run evaluation on existing results.
         output_dir (str, optional): Directory to save outputs. Defaults to PATH_RESULTS.
         baseline (bool, optional): If True, run baseline evaluation.
@@ -109,7 +117,7 @@ async def main(
     Returns:
         None
     """
-    metrics_tracker = MetricsTracker(output_dir=f"./financebench/token_analysis/baseline_{baseline}")
+    metrics_tracker = MetricsTracker(output_dir=f"./financebench/token_analysis/baseline_{baseline}_{embedding_model}")
     run_dir = metrics_tracker.create_run_directory(
         model=azure_openai_model,
         eval_mode=eval_mode,
@@ -117,6 +125,24 @@ async def main(
         use_icl=use_icl,
         run_idx=run_idx,
     )
+
+    if embedding_model in {"Cohere-embed-v3-english", "embed-v-4-0"}:
+        print("Using Cohere embeddings for retrieval")
+        embeddings = AzureCohereEmbeddings(
+            endpoint=os.getenv("AZURE_OSS_ENDPOINT"),
+            api_key=os.getenv("AZURE_OSS_KEY"),
+            deployment=embedding_model,
+        )
+    else:
+        print("Using Azure OpenAI embeddings for retrieval")
+        embeddings = AzureOpenAIEmbeddings(
+            api_key=os.environ["AZURE_OPENAI_KEY"],
+            azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
+            api_version="2024-02-01",
+            model="text-embedding-3-small",
+            azure_deployment="text-embedding-3-small",
+        )
+
     if evaluate_only:
         print("\nRunning in EVALUATE-ONLY mode...")
         save_path = (
@@ -215,6 +241,10 @@ async def main(
                 training_data_path=PROCESSED_PATH_DATASET_JSONL,
                 document_type="financebench",
                 icl_n=icl_n,
+                embedding_model=embedding_model,
+                embedding_provider="cohere"
+                if embedding_model in {"Cohere-embed-v3-english", "embed-v-4-0"}
+                else "azure_openai",
             )
             sample_per_question_type = math.ceil(icl_n / 3)
             icl_messages = icl_builder.get_icl_for_financebench(samples_per_type=sample_per_question_type)
@@ -253,13 +283,7 @@ async def main(
                 if last_docs != docs:
                     retriever, _ = build_vectorstore_retriever(
                         docs=docs,
-                        embeddings=AzureOpenAIEmbeddings(
-                            api_key=os.environ["AZURE_OPENAI_KEY"],
-                            azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
-                            api_version="2024-02-01",
-                            model="text-embedding-3-small",
-                            azure_deployment="text-embedding-3-small",
-                        ),
+                        embeddings=embeddings,
                     )
                     last_docs = docs
 
@@ -373,22 +397,28 @@ async def main(
 
 if __name__ == "__main__":
     eval_modes = ["oracle"]
-    azure_model_names = ["DeepSeek-V3.2", "Llama-4-Maverick-17B-128E-Instruct-FP8"]
+    azure_model_names = ["DeepSeek-V4-Flash"]
+    embedding_model = "text-embedding-3-small"
 
     icl_n = 9
     run_idx = "2"
-    evaluate_only = False
+    evaluate_only = True
     baseline = False
 
     if baseline:
-        use_icls = [False]
+        use_icls = [True, False]
         prompt_versions = ["baseline"]
         output_dir = PATH_BASELINE_RESULTS
         print("Running in BASELINE mode (ICL disabled)")
     else:
-        use_icls = [True, False]
+        use_icls = [True]
         prompt_versions = ["v4"]
-        output_dir = PATH_OSS_RESULTS
+        if embedding_model == "Cohere-embed-v3-english":
+            output_dir = PATH_OSS_RESULTS + "_cohere_3"
+        elif embedding_model == "embed-v-4-0":
+            output_dir = PATH_OSS_RESULTS + "_cohere_4"
+        else:
+            output_dir = PATH_OSS_RESULTS
         print("Running in EXPERIMENT mode (ICL enabled)")
 
     for prompt_version, eval_mode, use_icl, azure_model_name in product(
@@ -422,6 +452,7 @@ if __name__ == "__main__":
                 azure_openai_model=azure_model_name,
                 azure_endpoint=azure_endpoint,
                 azure_key=azure_key,
+                embedding_model=embedding_model,
                 run_idx=run_idx,
                 evaluate_only=evaluate_only,
                 output_dir=output_dir,

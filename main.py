@@ -25,6 +25,8 @@ load_dotenv()
 async def main(
     dry_run: bool = False,
     openai_model: str = os.getenv("AZURE_OPENAI_MODEL"),
+    embedding_model: str = "text-embedding-3-small",
+    embedding_provider: str = "azure_openai",
     use_doc_icl: bool = True,
     use_chunk_icl: bool = True,
     icl_n: int = 5,
@@ -51,6 +53,10 @@ async def main(
             Defaults to False.
         openai_model (str, optional): Name of the OpenAI/Azure model to use for
             ranking. Defaults to the value of the AZURE_OPENAI_MODEL environment variable.
+        embedding_model (str, optional): Embedding model name for ICL retrieval.
+            Defaults to "text-embedding-3-small".
+        embedding_provider (str, optional): Provider for embeddings ("azure_openai" or "cohere").
+            Defaults to "azure_openai".
         use_doc_icl (bool): If True, add ICL into the system prompt for document ranking.
         icl_n (int, optional): Number of in-context learning examples to retrieve.
             Defaults to 5.
@@ -81,6 +87,7 @@ async def main(
         "gpt-oss-120b",
         "grok-4-20-reasoning",
         "Llama-4-Maverick-17B-128E-Instruct-FP8",
+        "DeepSeek-V4-Flash",
     ]:
         openai_endpoint = os.getenv("AZURE_OSS_ENDPOINT")
         openai_key = os.getenv("AZURE_OSS_KEY")
@@ -228,6 +235,8 @@ async def main(
             chunk_final_k=top_k,
             metrics_tracker=chunk_metrics_tracker,
             run_dir=chunk_run_dir,
+            embedding_model=embedding_model,
+            embedding_provider=embedding_provider,
         )
 
         doc_task = evaluate_document_ranking(
@@ -244,6 +253,8 @@ async def main(
             icl_n=icl_n,
             metrics_tracker=doc_metrics_tracker,
             run_dir=doc_run_dir,
+            embedding_model=embedding_model,
+            embedding_provider=embedding_provider,
         )
 
         # Wait for both evaluations to complete
@@ -296,7 +307,9 @@ async def main(
 
 if __name__ == "__main__":
     dry_run = False
-    openai_model = "grok-4-20-reasoning"
+    openai_model = "DeepSeek-V4-Flash"
+    embedding_model = "text-embedding-3-small"
+    embedding_provider = "azure_openai"
     use_doc_icl = True  # Best config: True
     icl_n = 5  # Best config: 5
     use_chunk_icl = False  # Best config: False
@@ -316,6 +329,8 @@ if __name__ == "__main__":
         main(
             dry_run=dry_run,
             openai_model=openai_model,
+            embedding_model=embedding_model,
+            embedding_provider=embedding_provider,
             use_doc_icl=use_doc_icl,
             use_chunk_icl=use_chunk_icl,
             icl_n=icl_n,

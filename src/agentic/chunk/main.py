@@ -32,6 +32,8 @@ async def evaluate_chunk_ranking_multi_agent(
     dry_run: bool = False,
     use_icl: bool = True,
     icl_n: int = 5,
+    embedding_model: str = "text-embedding-3-small",
+    embedding_provider: str = "azure_openai",
 ) -> list[dict]:
     """Evaluate chunk ranking using multi-agent approach with checkpoint support.
 
@@ -63,6 +65,10 @@ async def evaluate_chunk_ranking_multi_agent(
             Defaults to True.
         icl_n (int, optional): Number of ICL examples to use per query.
             Defaults to 5.
+        embedding_model (str, optional): Embedding model name for ICL retrieval.
+            Defaults to "text-embedding-3-small".
+        embedding_provider (str, optional): Provider for embeddings ("azure_openai" or "cohere").
+            Defaults to "azure_openai".
 
     Returns:
         list[dict]: Submission data with format [{"sample_id": str, "target_index": int}]
@@ -82,7 +88,9 @@ async def evaluate_chunk_ranking_multi_agent(
     icl_builder = ICLMessageBuilder(
         training_data_path=training_data_path,
         icl_n=icl_n,
-        document_type="chunk"
+        document_type="chunk",
+        embedding_model=embedding_model,
+        embedding_provider=embedding_provider
     )
 
     # Print the data path being used

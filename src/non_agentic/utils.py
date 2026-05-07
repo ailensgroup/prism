@@ -227,7 +227,7 @@ async def _invoke_langchain_client(
     chunk_id: int,
     current_timestamp: str,
     output_dir: str,
-    timeout_seconds: int = 120,
+    timeout_seconds: int = 300,
 ) -> tuple[list[int], int, int, int, str, str]:
     """Call AzureAIOpenAIApiChatModel via .ainvoke().
 

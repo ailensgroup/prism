@@ -56,13 +56,8 @@ async def _chat_completion(
         if response_format is not None:
             kwargs["response_format"] = response_format
 
-        try:
-            response = await client.chat.completions.parse(**kwargs)
-        except Exception as e:
-            print(f"Warning: Structured output failed, falling back to regular completion: {e}")
-            kwargs.pop("response_format", None)
-            response = await client.chat.completions.parse(**kwargs)
-            raw_response_str = json.dumps(messages_to_dict([response])[0])
+        response = await client.chat.completions.parse(**kwargs)
+        raw_response_str = json.dumps(response.model_dump(), default=str)
 
         answer = response.choices[0].message.content
         if hasattr(response, "usage") and response.usage:
@@ -98,7 +93,7 @@ async def _chat_completion(
     raw_response_str = json.dumps(messages_to_dict([response])[0])
     answer = response.content
     # LangChain surfaces usage in response_metadata when the backend returns it
-    usage = getattr(response, "response_metadata", {}).get("token_usage", {})
+    usage = (getattr(response, "response_metadata", {}).get("token_usage") or {})
     i = usage.get("prompt_tokens", int(len(" ".join(m.get("content", "") for m in messages).split()) * 1.2))
     o = usage.get("completion_tokens", int(len(answer.split()) * 1.2))
     t = usage.get("total_tokens", i + o)

@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from langchain_core.vectorstores import VectorStoreRetriever
 from langchain_openai import AzureOpenAIEmbeddings
 
+from src.cohere_embeddings import AzureCohereEmbeddings
 from src.icl_message_builder import ICLMessageBuilder
 from src.non_agentic.financebench.vector_store import build_vectorstore_retriever_fiqa
 from src.non_agentic.fiqa.utils import evaluate_fiqa_results, get_fiqa_ranking
@@ -168,6 +169,7 @@ async def main(
     azure_openai_model: str = "gpt-5-mini",
     azure_openai_endpoint: str = "dummy_endpoint",  # Placeholder, will be overridden by env var
     azure_openai_key: str = "dummy_key",  # Placeholder, will be overridden by env var
+    embedding_model: str = "text-embedding-3-small",
     evaluate_only: bool = False,
     output_dir: str = "./results_fiqa",
     max_concurrent: int = 10,
@@ -183,6 +185,7 @@ async def main(
         azure_openai_model (str, optional): Azure OpenAI model name. Defaults to "gpt-5-mini".
         azure_openai_endpoint (str, optional): Azure OpenAI Endpoint.
         azure_openai_key (str, optional): Azure OpenAI Key.
+        embedding_model (str, optional): Embedding model for retrieval. Defaults to "text-embedding-3-small".
         evaluate_only (bool, optional): If True, only evaluate existing results. Defaults to False.
         output_dir (str, optional): Directory to save results. Defaults to "./results_fiqa".
         max_concurrent (int, optional): Maximum concurrent API calls. Defaults to 10.
@@ -193,7 +196,7 @@ async def main(
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    metrics_tracker = MetricsTracker(output_dir=os.path.join(output_dir, "token_analysis"))
+    metrics_tracker = MetricsTracker(output_dir=os.path.join(output_dir, f"token_analysis_{embedding_model}"))
     run_dir = metrics_tracker.create_run_directory(
         model=azure_openai_model,
         eval_mode="sharedStore",
@@ -202,16 +205,36 @@ async def main(
         run_idx=run_idx,
     )
 
-    results_file = os.path.join(output_dir, f"{azure_openai_model}_{prompt_version}_icl_{use_icl}_run_{run_idx}.csv")
+    results_file = os.path.join(
+        output_dir, f"{azure_openai_model}_{embedding_model}_{prompt_version}_icl_{use_icl}_run_{run_idx}.csv"
+    )
 
     evaluation_file = os.path.join(
-        output_dir, f"{azure_openai_model}_{prompt_version}_icl_{use_icl}_run_{run_idx}_evaluation.json"
+        output_dir,
+        f"{azure_openai_model}_{embedding_model}_{prompt_version}_icl_{use_icl}_run_{run_idx}_evaluation.json",
     )
 
     queries_file = "./data/fiqa/test/fiqa_queries.jsonl"
     qrels_file = "./data/fiqa/test/fiqa_qrels.csv"
     docs_file = "./data/fiqa/test/fiqa_docs.jsonl"
     processed_train_file = "./data/fiqa/train/processed_train.jsonl"
+
+    if embedding_model in {"Cohere-embed-v3-english", "embed-v-4-0"}:
+        print("Using Cohere embeddings for retrieval")
+        embeddings = AzureCohereEmbeddings(
+            endpoint=os.getenv("AZURE_OSS_ENDPOINT"),
+            api_key=os.getenv("AZURE_OSS_KEY"),
+            deployment=embedding_model,
+        )
+    else:
+        print("Using Azure OpenAI embeddings for retrieval")
+        embeddings = AzureOpenAIEmbeddings(
+            api_key=os.environ["AZURE_OPENAI_KEY"],
+            azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
+            api_version="2024-02-01",
+            model="text-embedding-3-small",
+            azure_deployment="text-embedding-3-small",
+        )
 
     if evaluate_only:
         print("\nRunning in EVALUATE-ONLY mode...")
@@ -305,14 +328,8 @@ async def main(
 
         print("\nBuilding shared vector store with all documents...")
         retriever, _ = build_vectorstore_retriever_fiqa(
-            embeddings=AzureOpenAIEmbeddings(
-                api_key=os.environ["AZURE_OPENAI_KEY"],
-                azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
-                api_version="2024-02-01",
-                model="text-embedding-3-small",
-                azure_deployment="text-embedding-3-small",
-            ),
-            db_path="./fiqa_vector_stores",
+            embeddings=embeddings,
+            db_path=f"./fiqa_vector_stores_{embedding_model}",
             docs_dict=docs_dict,
             search_number=search_number,
         )
@@ -367,13 +384,15 @@ async def main(
 
 
 if __name__ == "__main__":
-    azure_model_name = "Llama-4-Maverick-17B-128E-Instruct-FP8"
+    azure_model_name = "DeepSeek-V4-Flash"
+    embedding_model = "text-embedding-3-small"
 
     if azure_model_name in [
         "DeepSeek-V3.2",
         "gpt-oss-120b",
         "grok-4-20-reasoning",
         "Llama-4-Maverick-17B-128E-Instruct-FP8",
+        "DeepSeek-V4-Flash",
     ]:
         azure_endpoint = os.getenv("AZURE_OSS_ENDPOINT")
         azure_key = os.getenv("AZURE_OSS_KEY")
@@ -381,7 +400,7 @@ if __name__ == "__main__":
         azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
         azure_key = os.getenv("AZURE_OPENAI_KEY")
 
-    use_icls = [False]
+    use_icls = [True, False]
     prompt_versions = ["v4"]
 
     # Fixed settings
@@ -406,6 +425,7 @@ if __name__ == "__main__":
                 azure_openai_model=azure_model_name,
                 azure_openai_endpoint=azure_endpoint,
                 azure_openai_key=azure_key,
+                embedding_model=embedding_model,
                 run_idx=run_idx,
                 evaluate_only=evaluate_only,
                 output_dir=output_dir,

@@ -443,6 +443,8 @@ async def evaluate_chunk_ranking(
     chunk_final_k: int = 5,
     metrics_tracker: MetricsTracker | None = None,
     run_dir: str | None = None,
+    embedding_model: str = "text-embedding-3-small",
+    embedding_provider: str = "azure_openai",
 ) -> list[dict]:
     """Evaluate the chunk-ranking task and return submission-ready records.
 
@@ -480,7 +482,12 @@ async def evaluate_chunk_ranking(
         chunk_final_k (int, optional): Number of indices to return from the final stage.
         metrics_tracker (MetricsTracker | None, optional): Optional metrics tracker
             instance to log request/response details for monitoring. Defaults to None.
-        run_dir (str | None, optional): Optional directory name for this run, used in logging/artifact naming. Defaults to None.
+        run_dir (str | None, optional): Optional directory name for this run, used in logging/artifact naming.
+            Defaults to None.
+        embedding_model (str, optional): Embedding model name for ICL retrieval.
+            Defaults to "text-embedding-3-small".
+        embedding_provider (str, optional): Provider for embeddings ("azure_openai" or "cohere").
+            Defaults to "azure_openai".
 
     Returns:
         list[dict]: A list of submission records. Each record typically includes
@@ -491,7 +498,13 @@ async def evaluate_chunk_ranking(
 
     if use_icl:
         print("🤖 Initializing ICL Message Builder...")
-        icl_builder = ICLMessageBuilder(training_data_path=training_data_path, document_type="chunk", icl_n=icl_n)
+        icl_builder = ICLMessageBuilder(
+            training_data_path=training_data_path,
+            document_type="chunk",
+            icl_n=icl_n,
+            embedding_model=embedding_model,
+            embedding_provider=embedding_provider,
+        )
 
         # Print the data path being used
         print(f"📁 Data path provided: {data_path}")

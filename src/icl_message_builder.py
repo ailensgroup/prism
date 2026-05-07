@@ -2,11 +2,14 @@ import json
 import os
 import random
 import re
+from typing import Literal
 
 from dotenv import load_dotenv
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
 from langchain_openai import AzureOpenAIEmbeddings
+
+from .cohere_embeddings import AzureCohereEmbeddings
 
 load_dotenv()
 
@@ -22,7 +25,10 @@ class ICLMessageBuilder:
         training_data_path (str): Path to the JSONL training dataset.
         icl_n (int): Number of examples to retrieve (post-filtering).
         vector_store_path (str): Directory path where the FAISS index is stored.
-        embeddings (AzureOpenAIEmbeddings): Embedding client for indexing/search.
+        embedding_provider (str): Which embedding backend to use —
+            ``"azure_openai"`` (default) or ``"cohere"``.
+        embeddings (AzureOpenAIEmbeddings | CohereEmbeddings): Embedding client
+            for indexing/search.
         vector_store (FAISS | None): Loaded/created FAISS store.
         training_data (List[Dict]): Parsed training items (one per line).
     """
@@ -34,48 +40,111 @@ class ICLMessageBuilder:
         vector_store_path: str = "./embedding",
         document_type: str = "chunk",
         icl_n: int = 5,
+        embedding_provider: Literal["azure_openai", "cohere"] = "azure_openai",
     ) -> None:
         """Initialize the ICLMessageBuilder and prepare the vector store.
 
         Args:
             training_data_path (str): Path to the JSONL training data file.
-            embedding_model (str, optional): Embedding model name. Defaults to
-                `"text-embedding-3-small"`.
+            embedding_model (str, optional): Embedding model name.
+
+                - For ``"azure_openai"``: e.g. ``"text-embedding-3-small"``.
+                  Defaults to ``"text-embedding-3-small"``.
+                - For ``"cohere"``: e.g. ``"cohere-embed-v3-english"`` or
+                  ``"embed-v-4-0"``.
+
             vector_store_path (str, optional): Base directory for the FAISS store.
-                A subfolder is created using document type and model name.
-                Defaults to `"./embedding"`.
+                A subfolder is created using document type, provider and model name.
+                Defaults to ``"./embedding"``.
             document_type (str, optional): Logical document type used to construct
-                the store path (e.g., `"chunk"`, `"document"`). Defaults to `"chunk"`.
+                the store path (e.g., ``"chunk"``, ``"document"``). Defaults to
+                ``"chunk"``.
             icl_n (int, optional): Number of ICL examples to return after filtering.
                 Defaults to 5.
-            azure_openai_endpoint (str, optional): Azure OpenAI endpoint. Defaults to
-                `"dummy_endpoint"`.
-            azure_openai_key (str, optional): Azure OpenAI API key. Defaults to
-                `"dummy_key"`.
+            embedding_provider (str, optional): Which embedding backend to use.
+                Must be one of ``"azure_openai"`` or ``"cohere"``.
+                Defaults to ``"azure_openai"``.
+
+                - ``"azure_openai"`` — reads ``AZURE_OPENAI_KEY`` and
+                  ``AZURE_OPENAI_ENDPOINT`` from the environment.
+                - ``"cohere"`` — reads ``AZURE_COHERE_KEY`` and
+                  ``AZURE_COHERE_ENDPOINT`` from the environment.
+
+        Raises:
+            ValueError: If ``embedding_provider`` is not a recognised value.
         """
         self.training_data_path = training_data_path
         self.icl_n = icl_n
         self.document_type = document_type
+        self.embedding_provider = embedding_provider
 
-        # Construct vector store path
+        # Construct vector store path (provider-aware so stores never collide)
+        safe_model = embedding_model.replace("-", "_")
         self.vector_store_path = os.path.join(
             vector_store_path,
-            f"icl_store_{document_type}_{embedding_model.replace('-', '_')}",
+            f"icl_store_{document_type}_{embedding_provider}_{safe_model}",
         )
 
-        self.embeddings = AzureOpenAIEmbeddings(
-            api_key=os.getenv("AZURE_OPENAI_KEY"),
-            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-            api_version="2024-02-01",
-            model=embedding_model,
-            azure_deployment="text-embedding-3-small",
-        )
+        self.embeddings = self._build_embeddings(embedding_model)
 
         # Load or create vector store
         self.vector_store = None
         self.training_data = []
 
         self._initialize_vector_store()
+
+    def _build_embeddings(
+        self,
+        embedding_model: str,
+    ) -> AzureOpenAIEmbeddings | AzureCohereEmbeddings:
+        """Instantiate the correct embeddings client based on ``embedding_provider``.
+
+        Reads credentials exclusively from environment variables so that no
+        secrets need to be passed as constructor arguments.
+
+        Supported providers and their required env vars:
+
+        +----------------+---------------------------+---------------------------+
+        | Provider       | Key env var               | Endpoint env var          |
+        +================+===========================+===========================+
+        | azure_openai   | AZURE_OPENAI_KEY          | AZURE_OPENAI_ENDPOINT     |
+        +----------------+---------------------------+---------------------------+
+        | cohere         | AZURE_COHERE_KEY          | AZURE_COHERE_ENDPOINT     |
+        +----------------+---------------------------+---------------------------+
+
+        **Cohere model names (Azure AI Foundry deployments):**
+        - ``"cohere-embed-v3-english"``
+        - ``"embed-v-4-0"``
+
+        Args:
+            embedding_model (str): Model / deployment name to use.
+
+        Returns:
+            AzureOpenAIEmbeddings | CohereEmbeddings: Ready-to-use embeddings client.
+
+        Raises:
+            ValueError: If ``self.embedding_provider`` is not recognised.
+        """
+        if self.embedding_provider == "azure_openai":
+            print(f"🔌 Using Azure OpenAI embeddings — model: {embedding_model}")
+            return AzureOpenAIEmbeddings(
+                api_key=os.getenv("AZURE_OPENAI_KEY"),
+                azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+                api_version="2024-02-01",
+                model=embedding_model,
+                azure_deployment=embedding_model,
+            )
+
+        if self.embedding_provider == "cohere":
+            print(f"🔌 Using Azure Cohere embeddings — model: {embedding_model}")
+            return AzureCohereEmbeddings(
+                endpoint=os.getenv("AZURE_OSS_ENDPOINT"),
+                api_key=os.getenv("AZURE_OSS_KEY"),
+                deployment=embedding_model,
+            )
+
+        msg = f"Unknown embedding_provider '{self.embedding_provider}'. Supported values: 'azure_openai', 'cohere'."
+        raise ValueError(msg)
 
     def _ensure_path_exists(self) -> None:
         """Ensure directories for the vector store exist.

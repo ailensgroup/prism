@@ -90,6 +90,8 @@ async def evaluate_document_ranking(
     icl_n: int = 5,
     metrics_tracker: MetricsTracker | None = None,
     run_dir: str | None = None,
+    embedding_model: str = "text-embedding-3-small",
+    embedding_provider: str = "azure_openai",
 ) -> list[dict]:
     """Evaluate the document-ranking task and return submission-ready records.
 
@@ -124,6 +126,11 @@ async def evaluate_document_ranking(
         metrics_tracker (MetricsTracker | None, optional): Optional metrics
             tracker instance to log request/response details for monitoring. Defaults to ``None``.
         run_dir (str | None, optional): Optional directory name for this run, used in logging/artifact naming.
+            Defaults to None.
+        embedding_model (str, optional): Embedding model name for ICL retrieval.
+            Defaults to "text-embedding-3-small".
+        embedding_provider (str, optional): Provider for embeddings ("azure_openai" or "cohere").
+            Defaults to "azure_openai".
 
     Returns:
         list[dict]: A list of records suitable for submission. Each record
@@ -135,7 +142,13 @@ async def evaluate_document_ranking(
 
     if use_icl:
         print("🤖 Initializing ICL Message Builder...")
-        icl_builder = ICLMessageBuilder(training_data_path=training_data_path, document_type="document", icl_n=icl_n)
+        icl_builder = ICLMessageBuilder(
+            training_data_path=training_data_path,
+            document_type="document",
+            icl_n=icl_n,
+            embedding_model=embedding_model,
+            embedding_provider=embedding_provider,
+        )
 
         # Print the data path being used
         print(f"📁 Data path provided: {data_path}")

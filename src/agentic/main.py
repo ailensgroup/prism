@@ -29,8 +29,8 @@ async def main_multi_agent(
     document_agents: dict[str, DocumentExpertAgent],
     agentic_version: int,
     chunk_agents: dict[str, BaseRoleAgent],
-    azure_openai_endpoint: str,
-    azure_openai_key: str,
+    embedding_model: str = "text-embedding-3-small",
+    embedding_provider: str = "azure_openai",
 ) -> tuple[list, list] | None:
     """Enhanced main evaluation function with integrated multi-agent testing and logging.
 
@@ -56,8 +56,10 @@ async def main_multi_agent(
         document_agents (dict[str, DocumentExpertAgent]): Document expert agents.
         agentic_version (int): Agentic workflow version.
         chunk_agents (dict[str, RoleAgent]): Chunk scoring agents.
-        azure_openai_endpoint (str): Azure OpenAI endpoint URL.
-        azure_openai_key (str): Azure OpenAI API key.
+        embedding_model (str, optional): Embedding model name for ICL retrieval.
+            Defaults to "text-embedding-3-small".
+        embedding_provider (str, optional): Provider for embeddings ("azure_openai" or "cohere").
+            Defaults to "azure_openai".
 
     Returns:
         tuple[list, list] | None: A tuple containing (chunk_submission, doc_submission)
@@ -117,11 +119,11 @@ async def main_multi_agent(
             semaphore=semaphore,
             resume_from=resume_document_checkpoint,
             run_id=run_id,
-            azure_openai_endpoint=azure_openai_endpoint,
-            azure_openai_key=azure_openai_key,
             dry_run=dry_run,
             use_icl=use_doc_icl,
             icl_n=icl_n,
+            embedding_model=embedding_model,
+            embedding_provider=embedding_provider,
         ),
         name="document_evaluation",
     )
@@ -137,11 +139,11 @@ async def main_multi_agent(
             semaphore=semaphore,
             resume_from=resume_chunk_checkpoint,
             run_id=run_id,
-            azure_openai_endpoint=azure_openai_endpoint,
-            azure_openai_key=azure_openai_key,
             dry_run=dry_run,
             use_icl=use_chunk_icl,
             icl_n=icl_n,
+            embedding_model=embedding_model,
+            embedding_provider=embedding_provider,
         ),
         name="chunk_evaluation",
     )

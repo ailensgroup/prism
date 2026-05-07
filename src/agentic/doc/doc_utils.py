@@ -245,7 +245,7 @@ async def multi_agent_document_ranking(
             )
 
             # Step 3: Run the graph
-            final_state = await document_ranking_graph.ainvoke(initial_state, config={"step_timeout": 120})
+            final_state = await document_ranking_graph.ainvoke(initial_state, config={"step_timeout": 300})
             return final_state["final_ranking"][:5]
 
         except Exception as e:
@@ -264,11 +264,11 @@ async def evaluate_document_ranking_multi_agent(
     semaphore: asyncio.Semaphore,
     resume_from: str | None = None,
     run_id: str | None = None,
-    azure_openai_endpoint: str = "dummy_endpoint",
-    azure_openai_key: str = "dummy_key",
     dry_run: bool = False,
     use_icl: bool = True,
     icl_n: int = 5,
+    embedding_model: str = "text-embedding-3-small",
+    embedding_provider: str = "azure_openai",
 ) -> list[dict]:
     """Evaluate document ranking using multi-agent approach with checkpoint support.
 
@@ -290,16 +290,16 @@ async def evaluate_document_ranking_multi_agent(
             Defaults to None.
         run_id (str | None, optional): Unique identifier for this evaluation run.
             Auto-generated if None. Defaults to None.
-        azure_openai_endpoint (str, optional): Azure OpenAI endpoint URL.
-            Defaults to "dummy_endpoint".
-        azure_openai_key (str, optional): Azure OpenAI API key.
-            Defaults to "dummy_key".
         dry_run (bool, optional): If True, limits dataset size for testing.
             Defaults to False.
         use_icl (bool, optional): Enable in-context learning examples.
             Defaults to True.
         icl_n (int, optional): Number of ICL examples to use per query.
             Defaults to 5.
+        embedding_model (str, optional): Embedding model name for ICL retrieval.
+            Defaults to "text-embedding-3-small".
+        embedding_provider (str, optional): Provider for embeddings ("azure_openai" or "cohere").
+            Defaults to "azure_openai".
 
     Returns:
         list[dict]: Submission data with format [{"sample_id": str, "target_index": int}]
@@ -319,7 +319,9 @@ async def evaluate_document_ranking_multi_agent(
     icl_builder = ICLMessageBuilder(
         training_data_path=training_data_path,
         icl_n=icl_n,
-        document_type="document"
+        document_type="document",
+        embedding_model=embedding_model,
+        embedding_provider=embedding_provider
     )
 
     # Print the data path being used
